@@ -27,11 +27,10 @@ export function PersistenceDock() {
   const [selectedCaseId, setSelectedCaseId] = useState("");
   const [artifacts, setArtifacts] = useState<AtlasArtifact[]>([]);
   const [online, setOnline] = useState(false);
-  const [loading, setLoading] = useState(false);
+  const [loading, setLoading] = useState(true);
   const [message, setMessage] = useState("");
 
   const refreshCases = useCallback(async (preferredId?: string) => {
-    setLoading(true);
     try {
       const rows = await listCases();
       setCases(rows);
@@ -60,10 +59,41 @@ export function PersistenceDock() {
   }, []);
 
   useEffect(() => {
-    void refreshCases();
+    let initialLoadCancelled = false;
+    void listCases()
+      .then((rows) => {
+        if (initialLoadCancelled) return;
+        setCases(rows);
+        setOnline(true);
+        const stored = window.localStorage.getItem("atlas.currentCaseId") ?? "";
+        const selected = rows.some((row) => row.id === stored) ? stored : "";
+        setSelectedCaseId(selected);
+        if (selected) {
+          window.localStorage.setItem("atlas.currentCaseId", selected);
+          const activeCase = rows.find((row) => row.id === selected);
+          window.dispatchEvent(new CustomEvent("atlas:case-selected", {
+            detail: { caseId: selected, name: activeCase?.name ?? "" },
+          }));
+        }
+        setMessage("");
+      })
+      .catch((error: unknown) => {
+        if (initialLoadCancelled) return;
+        setOnline(false);
+        setMessage(error instanceof Error ? error.message : "Could not reach the local API.");
+      })
+      .finally(() => {
+        if (!initialLoadCancelled) setLoading(false);
+      });
     const onSaved = (event: Event) => {
       const detail = (event as CustomEvent<{ caseId?: string }>).detail;
+      setLoading(true);
       void refreshCases(detail?.caseId);
+      if (detail?.caseId) {
+        void listArtifacts(detail.caseId)
+          .then((rows) => setArtifacts(rows))
+          .catch((error) => setMessage(error instanceof Error ? error.message : "Could not refresh artifacts."));
+      }
     };
     const onNewCase = () => {
       setSelectedCaseId("");
@@ -72,12 +102,16 @@ export function PersistenceDock() {
     };
     const onCaseSelected = (event: Event) => {
       const detail = (event as CustomEvent<{ caseId?: string }>).detail;
-      if (detail?.caseId) setSelectedCaseId(detail.caseId);
+      if (detail?.caseId) {
+        setArtifacts([]);
+        setSelectedCaseId(detail.caseId);
+      }
     };
     window.addEventListener("atlas:case-saved", onSaved);
     window.addEventListener("atlas:new-case", onNewCase);
     window.addEventListener("atlas:case-selected", onCaseSelected);
     return () => {
+      initialLoadCancelled = true;
       window.removeEventListener("atlas:case-saved", onSaved);
       window.removeEventListener("atlas:new-case", onNewCase);
       window.removeEventListener("atlas:case-selected", onCaseSelected);
@@ -85,10 +119,7 @@ export function PersistenceDock() {
   }, [refreshCases]);
 
   useEffect(() => {
-    if (!selectedCaseId) {
-      setArtifacts([]);
-      return;
-    }
+    if (!selectedCaseId) return;
     let cancelled = false;
     void listArtifacts(selectedCaseId)
       .then((rows) => { if (!cancelled) setArtifacts(rows); })
@@ -145,7 +176,7 @@ export function PersistenceDock() {
               <div style={{ display: "flex", alignItems: "center", gap: 8, fontWeight: 700, fontSize: 14 }}><Database size={17} /> Local persistence</div>
               <div style={{ marginTop: 4, color: "#687386", fontSize: 11 }}>SQLite metadata · local files</div>
             </div>
-            <button type="button" aria-label="Refresh saved cases" onClick={() => void refreshCases(selectedCaseId)} style={{ border: 0, background: "transparent", color: "#606c7e", cursor: "pointer", padding: 4 }}><RefreshCw size={16} /></button>
+            <button type="button" aria-label="Refresh saved cases" onClick={() => { setLoading(true); void refreshCases(selectedCaseId); }} style={{ border: 0, background: "transparent", color: "#606c7e", cursor: "pointer", padding: 4 }}><RefreshCw size={16} /></button>
           </header>
           <div style={{ padding: 16 }}>
             <div style={{ display: "flex", alignItems: "center", gap: 7, fontSize: 12, marginBottom: 10, color: online ? "#167356" : "#b45309" }}>
@@ -156,6 +187,7 @@ export function PersistenceDock() {
             <label htmlFor="atlas-saved-case" style={{ display: "block", fontSize: 11, fontWeight: 700, color: "#667085", marginBottom: 6, textTransform: "uppercase", letterSpacing: ".06em" }}>Saved cases</label>
             <select id="atlas-saved-case" value={selectedCaseId} onChange={(event) => {
               const id = event.target.value;
+              if (id !== selectedCaseId) setArtifacts([]);
               setSelectedCaseId(id);
               if (id) {
                 window.localStorage.setItem("atlas.currentCaseId", id);

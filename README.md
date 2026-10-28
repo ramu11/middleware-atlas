@@ -120,27 +120,42 @@ to the model.
 9. Evidence correlation and RCA.
 10. Evaluation against sanitized, previously resolved cases.
 
-## Development
+## Development and local startup
 
-Start the Rust API:
+**Current implemented slice:** local case intake, Rust API, SQLite metadata, and filesystem-backed artifact uploads. Dify workflow orchestration and Eclipse MAT execution are not wired into the running app yet.
 
-    cargo run -p atlas-api
+Start the Rust API from the repository root in Terminal 1:
 
-Health check:
+```bash
+cargo run -p atlas-api
+```
 
-    curl http://127.0.0.1:8080/health
+Start the web UI from `apps/web` in Terminal 2:
 
-Run checks:
+```bash
+cd apps/web
+npm ci       # one-time install, or after dependency lockfile changes
+npm run dev
+```
 
-    cargo fmt --all -- --check
-    cargo test --workspace
+Open `http://localhost:3000`. Check the API with `curl -fsS http://127.0.0.1:8080/health`.
 
-Dify should be deployed separately using its official instructions:
-https://github.com/langgenius/dify
+Detailed instructions and component descriptions:
 
-See `docs/architecture.md` for boundaries and integration details.
+- [Getting started and local runbook](docs/getting-started.md)
+- [Component map and implemented/planned boundaries](docs/components.md)
+- [Local development troubleshooting](docs/troubleshooting.md)
+- [Architecture](docs/architecture.md)
+- [Configuration](docs/configuration.md)
+- [Persistence and API](docs/persistence.md)
 
-See `docs/persistence.md` for the local SQLite schema and API endpoints, and `docs/configuration.md` for runtime settings and artifact classification.
+Run checks before committing:
+
+```bash
+cargo fmt --all -- --check
+cargo test --workspace
+(cd apps/web && npm run typecheck && npm run lint && npm run build)
+```
 
 ## Security
 

@@ -76,12 +76,45 @@ export function listArtifacts(caseId: string): Promise<AtlasArtifact[]> {
   return request<AtlasArtifact[]>(`/api/v1/cases/${encodeURIComponent(caseId)}/artifacts`);
 }
 
-export function uploadArtifact(caseId: string, file: File): Promise<AtlasArtifact> {
+export function uploadArtifact(
+  caseId: string,
+  file: File,
+  onProgress?: (percent: number) => void,
+): Promise<AtlasArtifact> {
   const form = new FormData();
   form.append("file", file, file.name);
-  return request<AtlasArtifact>(`/api/v1/cases/${encodeURIComponent(caseId)}/artifacts`, {
-    method: "POST",
-    body: form,
+
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", `${API_BASE}/api/v1/cases/${encodeURIComponent(caseId)}/artifacts`);
+    xhr.responseType = "text";
+    xhr.upload.addEventListener("progress", (event) => {
+      if (event.lengthComputable && onProgress) {
+        onProgress(Math.min(100, Math.round((event.loaded / event.total) * 100)));
+      }
+    });
+    xhr.addEventListener("load", () => {
+      let payload: unknown;
+      try {
+        payload = JSON.parse(xhr.responseText) as unknown;
+      } catch {
+        reject(new Error(`API returned an invalid response (${xhr.status}).`));
+        return;
+      }
+      if (xhr.status >= 200 && xhr.status < 300) {
+        onProgress?.(100);
+        resolve(payload as AtlasArtifact);
+        return;
+      }
+      const body = payload as ApiErrorBody;
+      reject(new Error(body?.error ?? `Upload failed (${xhr.status}).`));
+    });
+    xhr.addEventListener("error", () => {
+      reject(new Error(`Cannot connect to Middleware Atlas API at ${API_BASE}. Start the Rust API and retry.`));
+    });
+    xhr.addEventListener("abort", () => reject(new Error("Upload was cancelled.")));
+    onProgress?.(0);
+    xhr.send(form);
   });
 }
 

@@ -7,7 +7,8 @@ import {
   MessageSquareText, Network, Plus, Search, Server, ShieldCheck, Trash2,
   Upload, X, Zap,
 } from "lucide-react";
-import { useCallback, useMemo, useRef, useState, type ChangeEvent, type DragEvent, useEffect } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent, type DragEvent } from "react";
+import { createCase, deleteArtifact, getCase, listArtifacts, updateCase, uploadArtifact, type AtlasArtifact } from "@/lib/atlas-api";
 
 type ArtifactKind =
   | "Kafka logs" | "Artemis logs" | "Heap dump" | "Thread dump"
@@ -18,6 +19,30 @@ type Artifact = {
   file: File;
   kind: ArtifactKind;
 };
+
+type UploadState = {
+  status: "uploading" | "failed";
+  progress: number;
+  error?: string;
+};
+
+function fileFingerprint(file: File): string {
+  return `${file.name}::${file.size}::${file.lastModified}`;
+}
+
+function displayKindFromApi(kind: string): ArtifactKind {
+  switch (kind) {
+    case "kafka_log": return "Kafka logs";
+    case "artemis_log": return "Artemis logs";
+    case "heap_dump": return "Heap dump";
+    case "thread_dump": return "Thread dump";
+    case "sosreport": return "sosreport";
+    case "openshift_bundle": return "OpenShift";
+    case "debezium": return "Debezium";
+    case "archive": return "Archive";
+    default: return "Other";
+  }
+}
 
 const kindStyles: Record<ArtifactKind, string> = {
   "Kafka logs": "kind-kafka",
@@ -64,9 +89,10 @@ function FileGlyph({ kind }: { kind: ArtifactKind }) {
   return <FileText size={19} />;
 }
 
-import { createCase, updateCase, uploadArtifact } from "@/lib/atlas-api";
 export default function Home() {
   const [artifacts, setArtifacts] = useState<Artifact[]>([]);
+  const [persistedArtifacts, setPersistedArtifacts] = useState<AtlasArtifact[]>([]);
+  const [uploadStates, setUploadStates] = useState<Record<string, UploadState>>({});
   const [dragging, setDragging] = useState(false);
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState("All files");
@@ -81,11 +107,9 @@ export default function Home() {
     if (!selected.length) return;
 
     setArtifacts((current) => {
-      const known = new Set(
-        current.map((a) => `${a.file.name}:${a.file.size}:${a.file.lastModified}`),
-      );
+      const known = new Set(current.map((artifact) => fileFingerprint(artifact.file)));
       const fresh = selected.filter((file) => {
-        const key = `${file.name}:${file.size}:${file.lastModified}`;
+        const key = fileFingerprint(file);
         if (known.has(key)) return false;
         known.add(key);
         return true;
@@ -122,9 +146,19 @@ export default function Home() {
     const matchesFilter = filter === "All files" || item.kind === filter;
     return matchesQuery && matchesFilter;
   }), [artifacts, filter, query]);
+  const visiblePersistedArtifacts = useMemo(() => persistedArtifacts.filter((item) => {
+    const matchesQuery = item.filename.toLowerCase().includes(query.toLowerCase());
+    const matchesFilter = filter === "All files" || displayKindFromApi(item.kind) === filter;
+    return matchesQuery && matchesFilter;
+  }), [persistedArtifacts, filter, query]);
 
-  const totalBytes = artifacts.reduce((sum, item) => sum + item.file.size, 0);
-  const categories = [...new Set(artifacts.map((item) => item.kind))];
+  const totalBytes = artifacts.reduce((sum, item) => sum + item.file.size, 0)
+    + persistedArtifacts.reduce((sum, item) => sum + item.size_bytes, 0);
+  const totalArtifactCount = artifacts.length + persistedArtifacts.length;
+  const categories = [...new Set([
+    ...artifacts.map((item) => item.kind),
+    ...persistedArtifacts.map((item) => displayKindFromApi(item.kind)),
+  ])];
 
     const [persistenceBusy, setPersistenceBusy] = useState(false);
   const [persistenceMessage, setPersistenceMessage] = useState("");
@@ -132,22 +166,55 @@ export default function Home() {
   const [persistedFileKeys, setPersistedFileKeys] = useState<Record<string, string>>({});
 
   useEffect(() => {
+    let disposed = false;
+
+    const hydrateCase = async (caseId: string, hintedName?: string) => {
+      setPersistedCaseId(caseId);
+      try {
+        const [record, rows] = await Promise.all([getCase(caseId), listArtifacts(caseId)]);
+        if (disposed) return;
+        setCaseName(record.name || hintedName || "New support case");
+        setPersistedArtifacts(rows);
+        try {
+          const raw = window.localStorage.getItem(`atlas.uploadedFiles.${caseId}`) ?? "{}";
+          setPersistedFileKeys(JSON.parse(raw) as Record<string, string>);
+        } catch {
+          setPersistedFileKeys({});
+        }
+        window.localStorage.setItem("atlas.currentCaseId", caseId);
+      } catch (error) {
+        if (!disposed) {
+          setPersistenceMessage(error instanceof Error ? error.message : "Could not load this saved case.");
+        }
+      }
+    };
+
+    const activeCaseId = window.localStorage.getItem("atlas.currentCaseId");
+    if (activeCaseId) void hydrateCase(activeCaseId);
+
     const onSelected = (event: Event) => {
       const detail = (event as CustomEvent<{ caseId?: string; name?: string }>).detail;
-      if (!detail?.caseId) return;
-      setPersistedCaseId(detail.caseId);
-      try { setPersistedFileKeys(JSON.parse(window.localStorage.getItem(`atlas.uploadedFiles.${detail.caseId}`) ?? "{}") as Record<string, string>); } catch { setPersistedFileKeys({}); }
-      if (detail.name) setCaseName(detail.name);
+      if (detail?.caseId) void hydrateCase(detail.caseId, detail.name);
+    };
+    const onSaved = (event: Event) => {
+      const detail = (event as CustomEvent<{ caseId?: string }>).detail;
+      if (detail?.caseId) void hydrateCase(detail.caseId);
     };
     const onNew = () => {
       setPersistedCaseId(null);
+      setPersistedArtifacts([]);
       setPersistedFileKeys({});
-      setPersistenceMessage("New case selected. Continue to case details to save it.");
+      setCaseName("New support case");
+      setPersistenceMessage("New case selected. Continue to save it and upload any staged files.");
     };
+
     window.addEventListener("atlas:case-selected", onSelected);
+    window.addEventListener("atlas:case-saved", onSaved);
     window.addEventListener("atlas:new-case", onNew);
     return () => {
+      disposed = true;
       window.removeEventListener("atlas:case-selected", onSelected);
+      window.removeEventListener("atlas:case-saved", onSaved);
       window.removeEventListener("atlas:new-case", onNew);
     };
   }, []);
@@ -155,41 +222,75 @@ export default function Home() {
   const handlePersistCase = async () => {
     if (persistenceBusy) return;
     setPersistenceBusy(true);
-    setPersistenceMessage("Saving case and streaming artifacts to local storage…");
+    setPersistenceMessage("Saving case details…");
     let activeId = persistedCaseId ?? window.localStorage.getItem("atlas.currentCaseId");
+
     try {
-      const selected = Array.isArray(artifacts) ? (artifacts as unknown as Array<File | { file?: File }> ) : [];
-      const pendingFiles = selected
-        .map((item) => {
-          if (typeof File !== "undefined" && item instanceof File) return item;
-          if (item && typeof item === "object" && "file" in item && item.file instanceof File) return item.file;
-          return null;
-        })
-        .filter((item): item is File => item !== null);
-      const requestedName = String(caseName ?? "").trim() || "Middleware Atlas support case";
+      const requestedName = caseName.trim() || "Middleware Atlas support case";
       if (!activeId) {
         const created = await createCase(requestedName);
         activeId = created.id;
-        setPersistedCaseId(activeId);
-        window.localStorage.setItem("atlas.currentCaseId", activeId);
+        setPersistedCaseId(created.id);
+        window.localStorage.setItem("atlas.currentCaseId", created.id);
       } else {
         await updateCase(activeId, requestedName);
       }
-      let uploaded = { ...persistedFileKeys };
-      try { uploaded = { ...uploaded, ...(JSON.parse(window.localStorage.getItem(`atlas.uploadedFiles.${activeId}`) ?? "{}") as Record<string, string>) }; } catch { /* Ignore corrupt retry bookkeeping and continue. */ }
-      let savedCount = 0;
-      for (const file of pendingFiles) {
-        const key = `${file.name}::${file.size}::${file.lastModified}`;
-        if (uploaded[key]) continue;
-        const saved = await uploadArtifact(activeId, file);
-        uploaded[key] = saved.id;
-        savedCount += 1;
-        window.localStorage.setItem(`atlas.uploadedFiles.${activeId}`, JSON.stringify(uploaded));
-        setPersistedFileKeys({ ...uploaded });
-        window.dispatchEvent(new CustomEvent("atlas:case-saved", { detail: { caseId: activeId } }));
+
+      if (!activeId) throw new Error("Could not resolve the active case identifier.");
+      const caseId: string = activeId;
+      let uploaded: Record<string, string> = { ...persistedFileKeys };
+      try {
+        uploaded = {
+          ...uploaded,
+          ...(JSON.parse(window.localStorage.getItem(`atlas.uploadedFiles.${caseId}`) ?? "{}") as Record<string, string>),
+        };
+      } catch {
+        // A corrupt retry marker must not prevent the user from saving the case.
       }
+
+      let savedCount = 0;
+      for (const item of artifacts) {
+        const file = item.file;
+        const key = fileFingerprint(file);
+        if (uploaded[key]) {
+          setArtifacts((current) => current.filter((candidate) => fileFingerprint(candidate.file) !== key));
+          continue;
+        }
+
+        setUploadStates((current) => ({ ...current, [key]: { status: "uploading", progress: 0 } }));
+        setPersistenceMessage(`Uploading ${file.name} · 0%`);
+        try {
+          const saved = await uploadArtifact(caseId, file, (percent) => {
+            setUploadStates((current) => ({ ...current, [key]: { status: "uploading", progress: percent } }));
+            setPersistenceMessage(`Uploading ${file.name} · ${percent}%`);
+          });
+          uploaded[key] = saved.id;
+          window.localStorage.setItem(`atlas.uploadedFiles.${caseId}`, JSON.stringify(uploaded));
+          setPersistedFileKeys({ ...uploaded });
+          setPersistedArtifacts((current) => [saved, ...current.filter((artifact) => artifact.id !== saved.id)]);
+          setArtifacts((current) => current.filter((candidate) => fileFingerprint(candidate.file) !== key));
+          setUploadStates((current) => {
+            const next = { ...current };
+            delete next[key];
+            return next;
+          });
+          savedCount += 1;
+          window.dispatchEvent(new CustomEvent("atlas:case-saved", { detail: { caseId } }));
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "Upload failed. Check the API and retry.";
+          setUploadStates((current) => ({ ...current, [key]: { status: "failed", progress: 0, error: message } }));
+          throw new Error(`Could not upload ${file.name}: ${message}`);
+        }
+      }
+
       window.dispatchEvent(new CustomEvent("atlas:case-saved", { detail: { caseId: activeId } }));
-      setPersistenceMessage(savedCount > 0 ? `Saved case and ${savedCount} artifact${savedCount === 1 ? "" : "s"}.` : (pendingFiles.length > 0 ? "Case is up to date; selected files were already saved." : "Case saved. Add diagnostic files when ready."));
+      setPersistenceMessage(
+        savedCount > 0
+          ? `Saved case and uploaded ${savedCount} artifact${savedCount === 1 ? "" : "s"}.`
+          : artifacts.length > 0
+            ? "Case saved. Selected files were already uploaded for this case."
+            : "Case saved. Add diagnostic artifacts whenever you're ready.",
+      );
     } catch (error) {
       setPersistenceMessage(error instanceof Error ? `Save failed: ${error.message}` : "Save failed. Check the Rust API and retry.");
       if (activeId) window.dispatchEvent(new CustomEvent("atlas:case-saved", { detail: { caseId: activeId } }));
@@ -198,6 +299,33 @@ export default function Home() {
     }
   };
 
+  const handleDeletePersistedArtifact = async (artifact: AtlasArtifact) => {
+    const caseId = persistedCaseId ?? artifact.case_id;
+    if (!caseId) return;
+    if (!window.confirm(`Delete ${artifact.filename} from this case and remove its local file?`)) return;
+    try {
+      await deleteArtifact(caseId, artifact.id);
+      setPersistedArtifacts((current) => current.filter((item) => item.id !== artifact.id));
+      try {
+        const key = `atlas.uploadedFiles.${caseId}`;
+        const raw = window.localStorage.getItem(key);
+        if (raw) {
+          const markers = JSON.parse(raw) as Record<string, string>;
+          for (const [fingerprint, savedId] of Object.entries(markers)) {
+            if (savedId === artifact.id) delete markers[fingerprint];
+          }
+          window.localStorage.setItem(key, JSON.stringify(markers));
+          setPersistedFileKeys(markers);
+        }
+      } catch {
+        // Server-side deletion remains authoritative if retry bookkeeping is malformed.
+      }
+      setPersistenceMessage(`Deleted ${artifact.filename} from local storage.`);
+      window.dispatchEvent(new CustomEvent("atlas:case-saved", { detail: { caseId } }));
+    } catch (error) {
+      setPersistenceMessage(error instanceof Error ? `Delete failed: ${error.message}` : "Could not delete the artifact.");
+    }
+  };
 return (
     <main className="app-shell">
       <aside className={`sidebar ${showMenu ? "sidebar-open" : ""}`}>
@@ -234,7 +362,7 @@ return (
         <div className="sidebar-bottom">
           <div className="local-card">
             <div className="local-icon"><ShieldCheck size={17} /></div>
-            <div><strong>Local-first workspace</strong><p>Files stay in your browser until a backend is connected.</p></div>
+            <div><strong>Local-first workspace</strong><p>Uploads are stored on this machine through the Rust API.</p></div>
           </div>
           <a className="nav-item" href="#help"><CircleHelp size={17} /><span>Help &amp; documentation</span></a>
           <div className="profile-row">
@@ -326,7 +454,7 @@ return (
               <button className="button button-primary browse-button" onClick={() => inputRef.current?.click()}>
                 <Plus size={16} /> Browse files
               </button>
-              <div className="upload-footnote"><ShieldCheck size={13} /> Files are selected locally; no upload occurs yet.</div>
+              <div className="upload-footnote"><ShieldCheck size={13} /> Files upload to local storage when you save the case.</div>
             </div>
 
             <div className="supported-row">
@@ -343,7 +471,7 @@ return (
           <section className="files-section" id="artifacts">
             <div className="files-heading">
               <div>
-                <h2>Selected files <span className="count-pill">{artifacts.length}</span></h2>
+                <h2>Case artifacts <span className="count-pill">{totalArtifactCount}</span></h2>
                 <p>Review what you have gathered before moving to case details.</p>
               </div>
               <button className="button button-secondary add-more" onClick={() => inputRef.current?.click()}>
@@ -351,7 +479,7 @@ return (
               </button>
             </div>
 
-            {artifacts.length === 0 ? (
+            {totalArtifactCount === 0 ? (
               <div className="empty-files">
                 <div className="empty-icon"><FolderOpen size={21} /></div>
                 <div><strong>Your evidence starts here</strong><p>Files you select will appear here, ready for review.</p></div>
@@ -366,21 +494,50 @@ return (
                   </select>
                 </div>
                 <div className="file-list">
-                  {visibleFiles.map((item) => (
-                    <div className="file-row" key={item.id}>
-                      <div className={`file-icon ${kindStyles[item.kind]}`}><FileGlyph kind={item.kind} /></div>
-                      <div className="file-info">
-                        <strong title={item.file.name}>{item.file.name}</strong>
-                        <span>{formatSize(item.file.size)} <span className="meta-separator">·</span> Selected locally</span>
+                  {visibleFiles.map((item) => {
+                    const key = fileFingerprint(item.file);
+                    const upload = uploadStates[key];
+                    return (
+                      <div className="file-row" key={item.id}>
+                        <div className={`file-icon ${kindStyles[item.kind]}`}><FileGlyph kind={item.kind} /></div>
+                        <div className="file-info">
+                          <strong title={item.file.name}>{item.file.name}</strong>
+                          <span>{formatSize(item.file.size)} <span className="meta-separator">·</span> Pending upload</span>
+                          {upload?.error && <span role="alert" style={{ color: "#b42318", overflowWrap: "anywhere" }}>{upload.error}</span>}
+                          {upload?.status === "uploading" && (
+                            <div aria-label={`Upload progress ${upload.progress}%`} role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={upload.progress} style={{ height: 4, marginTop: 7, background: "#e6e8f1", borderRadius: 999, overflow: "hidden" }}>
+                              <div style={{ width: `${upload.progress}%`, height: "100%", background: "#635bdb", transition: "width .12s linear" }} />
+                            </div>
+                          )}
+                        </div>
+                        <span className={`kind-badge ${kindStyles[item.kind]}`}>{item.kind}</span>
+                        <span className="file-ready">
+                          {upload?.status === "uploading" ? <Upload size={13} /> : upload?.status === "failed" ? <X size={13} /> : <Check size={13} />}
+                          {upload?.status === "uploading" ? `${upload.progress}%` : upload?.status === "failed" ? "Retry needed" : "Ready"}
+                        </span>
+                        <button className="icon-button remove-file" title={`Remove ${item.file.name}`} aria-label={`Remove ${item.file.name}`} onClick={() => removeFile(item.id)}><Trash2 size={16} /></button>
                       </div>
-                      <span className={`kind-badge ${kindStyles[item.kind]}`}>{item.kind}</span>
-                      <span className="file-ready"><Check size={13} /> Ready</span>
-                      <button className="icon-button remove-file" title={`Remove ${item.file.name}`} aria-label={`Remove ${item.file.name}`} onClick={() => removeFile(item.id)}><Trash2 size={16} /></button>
-                    </div>
-                  ))}
-                  {visibleFiles.length === 0 && <div className="no-results">No files match this search.</div>}
+                    );
+                  })}
+                  {visiblePersistedArtifacts.map((item) => {
+                    const kind = displayKindFromApi(item.kind);
+                    return (
+                      <div className="file-row" key={`stored-${item.id}`}>
+                        <div className={`file-icon ${kindStyles[kind]}`}><FileGlyph kind={kind} /></div>
+                        <div className="file-info">
+                          <strong title={item.filename}>{item.filename}</strong>
+                          <span>{formatSize(item.size_bytes)} <span className="meta-separator">·</span> {item.product}</span>
+                          <span title={item.sha256} style={{ fontFamily: "ui-monospace, monospace", fontSize: 11 }}>SHA-256 {item.sha256.slice(0, 12)}…</span>
+                        </div>
+                        <span className={`kind-badge ${kindStyles[kind]}`}>{kind}</span>
+                        <span className="file-ready"><Check size={13} /> Stored</span>
+                        <button className="icon-button remove-file" title={`Delete ${item.filename} from local storage`} aria-label={`Delete ${item.filename}`} onClick={() => void handleDeletePersistedArtifact(item)}><Trash2 size={16} /></button>
+                      </div>
+                    );
+                  })}
+                  {visibleFiles.length === 0 && visiblePersistedArtifacts.length === 0 && <div className="no-results">No artifacts match this search.</div>}
                 </div>
-                <div className="file-summary"><span><Check size={14} /> {artifacts.length} file{artifacts.length === 1 ? "" : "s"} selected</span><span>{formatSize(totalBytes)} total</span><button className="clear-all" onClick={() => setArtifacts([])}>Clear all</button></div>
+                <div className="file-summary"><span><Check size={14} /> {totalArtifactCount} artifact{totalArtifactCount === 1 ? "" : "s"} in this case</span><span>{formatSize(totalBytes)} total</span><button className="clear-all" onClick={() => { setArtifacts([]); setUploadStates({}); }}>Clear selections</button></div>
               </>
             )}
           </section>
@@ -407,8 +564,10 @@ return (
             <button
               className="button button-primary continue-button"
               onClick={handlePersistCase}
+              disabled={persistenceBusy}
+              aria-busy={persistenceBusy}
             >
-              Continue to case details <ArrowRight size={16} />
+              {persistenceBusy ? "Saving…" : "Save case & upload artifacts"} {!persistenceBusy && <ArrowRight size={16} />}
             </button>
       {persistenceMessage && (
         <div role="status" aria-live="polite" style={{ position: "fixed", left: "50%", bottom: 24, transform: "translateX(-50%)", zIndex: 9999, maxWidth: "min(640px, calc(100vw - 32px))", padding: "12px 16px", borderRadius: 12, background: "#202838", color: "white", boxShadow: "0 10px 36px rgba(20,29,48,.22)", fontSize: 13, lineHeight: 1.45 }}>
