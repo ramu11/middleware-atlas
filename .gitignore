@@ -1,0 +1,8 @@
+
+# Middleware Atlas runtime data, backups and Rust build outputs
+/data/
+/.middleware-atlas-data/
+/target/
+*.bak*
+.env
+.env.local

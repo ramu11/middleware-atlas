@@ -69,7 +69,7 @@ limits and audit records.
 | Model selection | Dify-configured provider/model; local Qwen supported through a compatible provider |
 | Tool integration | Versioned tool contracts and Rust adapters |
 | Heap analysis | Eclipse MAT batch/query interface; evaluate Eclipse Jifa |
-| Case metadata | PostgreSQL |
+| Case metadata | SQLite (SQLx, WAL mode) |
 | Artifact storage | Local filesystem initially; optional S3-compatible storage |
 | Optional specialist workers | Python behind narrow, versioned contracts |
 
@@ -139,6 +139,8 @@ Dify should be deployed separately using its official instructions:
 https://github.com/langgenius/dify
 
 See `docs/architecture.md` for boundaries and integration details.
+
+See `docs/persistence.md` for the local SQLite schema and API endpoints, and `docs/configuration.md` for runtime settings and artifact classification.
 
 ## Security
 

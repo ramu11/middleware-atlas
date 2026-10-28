@@ -1,0 +1,91 @@
+# Middleware Atlas runtime configuration.
+# Relative paths are always anchored to the repository/project root, not the shell's CWD.
+# Environment variables override these settings. Do not put credentials in this file.
+
+[application]
+name = "Middleware Atlas"
+max_case_name_chars = 140
+
+[server]
+bind_addr = "127.0.0.1:8080"
+web_origin = "http://localhost:3000"
+
+[storage]
+data_dir = "data"
+database_filename = "middleware-atlas.db"
+# Per-file upload limit. 100 GiB; lower this if your workstation quota is smaller.
+max_upload_bytes = 107374182400
+
+[database]
+max_connections = 5
+busy_timeout_seconds = 10
+
+[diagnostics]
+fallback_kind = "other"
+fallback_product = "Other / Unclassified"
+
+# Rules are evaluated from top to bottom. Keep specific rules before generic ones.
+# match_mode = "any": match any configured filename token or extension.
+# match_mode = "all": require a token AND one of the listed extensions.
+[[diagnostics.artifact_rules]]
+kind = "heap_dump"
+product = "Java / JVM"
+contains_any = []
+extensions = [".hprof", ".heapdump", ".phd"]
+match_mode = "any"
+
+[[diagnostics.artifact_rules]]
+kind = "thread_dump"
+product = "Java / JVM"
+contains_any = ["thread"]
+extensions = [".txt", ".log", ".dump"]
+match_mode = "all"
+
+[[diagnostics.artifact_rules]]
+kind = "sosreport"
+product = "Red Hat Enterprise Linux"
+contains_any = ["sosreport"]
+extensions = [".sos"]
+match_mode = "any"
+
+[[diagnostics.artifact_rules]]
+kind = "debezium"
+product = "Debezium"
+contains_any = ["debezium"]
+extensions = []
+match_mode = "any"
+
+[[diagnostics.artifact_rules]]
+kind = "artemis_log"
+product = "Apache ActiveMQ Artemis"
+contains_any = ["artemis", "activemq"]
+extensions = []
+match_mode = "any"
+
+[[diagnostics.artifact_rules]]
+kind = "kafka_log"
+product = "Apache Kafka / MirrorMaker 2"
+contains_any = ["kafka", "mirrormaker", "mirror-maker"]
+extensions = []
+match_mode = "any"
+
+[[diagnostics.artifact_rules]]
+kind = "openshift_bundle"
+product = "Red Hat OpenShift"
+contains_any = ["openshift", "must-gather", "must_gather"]
+extensions = []
+match_mode = "any"
+
+[[diagnostics.artifact_rules]]
+kind = "archive"
+product = "Generic Archive"
+contains_any = []
+extensions = [".tar.zst", ".zip", ".tar", ".tgz", ".gz", ".7z", ".xz", ".bz2", ".zst"]
+match_mode = "any"
+
+[[diagnostics.artifact_rules]]
+kind = "log"
+product = "Generic Log / Text"
+contains_any = []
+extensions = [".log", ".txt", ".out", ".err"]
+match_mode = "any"

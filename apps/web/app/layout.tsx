@@ -7,12 +7,15 @@ export const metadata: Metadata = {
     "Investigate middleware incidents with structured evidence and diagnostic tools.",
 };
 
+import { PersistenceDock } from "@/components/persistence-dock";
+
 export default function RootLayout({
   children,
 }: Readonly<{ children: React.ReactNode }>) {
   return (
     <html lang="en">
-      <body>{children}</body>
+      <body>{children}
+        <PersistenceDock /></body>
     </html>
   );
 }

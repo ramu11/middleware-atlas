@@ -7,10 +7,7 @@ import {
   MessageSquareText, Network, Plus, Search, Server, ShieldCheck, Trash2,
   Upload, X, Zap,
 } from "lucide-react";
-import {
-  useCallback, useMemo, useRef, useState,
-  type ChangeEvent, type DragEvent,
-} from "react";
+import { useCallback, useMemo, useRef, useState, type ChangeEvent, type DragEvent, useEffect } from "react";
 
 type ArtifactKind =
   | "Kafka logs" | "Artemis logs" | "Heap dump" | "Thread dump"
@@ -67,6 +64,7 @@ function FileGlyph({ kind }: { kind: ArtifactKind }) {
   return <FileText size={19} />;
 }
 
+import { createCase, updateCase, uploadArtifact } from "@/lib/atlas-api";
 export default function Home() {
   const [artifacts, setArtifacts] = useState<Artifact[]>([]);
   const [dragging, setDragging] = useState(false);
@@ -128,7 +126,79 @@ export default function Home() {
   const totalBytes = artifacts.reduce((sum, item) => sum + item.file.size, 0);
   const categories = [...new Set(artifacts.map((item) => item.kind))];
 
-  return (
+    const [persistenceBusy, setPersistenceBusy] = useState(false);
+  const [persistenceMessage, setPersistenceMessage] = useState("");
+  const [persistedCaseId, setPersistedCaseId] = useState<string | null>(null);
+  const [persistedFileKeys, setPersistedFileKeys] = useState<Record<string, string>>({});
+
+  useEffect(() => {
+    const onSelected = (event: Event) => {
+      const detail = (event as CustomEvent<{ caseId?: string; name?: string }>).detail;
+      if (!detail?.caseId) return;
+      setPersistedCaseId(detail.caseId);
+      try { setPersistedFileKeys(JSON.parse(window.localStorage.getItem(`atlas.uploadedFiles.${detail.caseId}`) ?? "{}") as Record<string, string>); } catch { setPersistedFileKeys({}); }
+      if (detail.name) setCaseName(detail.name);
+    };
+    const onNew = () => {
+      setPersistedCaseId(null);
+      setPersistedFileKeys({});
+      setPersistenceMessage("New case selected. Continue to case details to save it.");
+    };
+    window.addEventListener("atlas:case-selected", onSelected);
+    window.addEventListener("atlas:new-case", onNew);
+    return () => {
+      window.removeEventListener("atlas:case-selected", onSelected);
+      window.removeEventListener("atlas:new-case", onNew);
+    };
+  }, []);
+
+  const handlePersistCase = async () => {
+    if (persistenceBusy) return;
+    setPersistenceBusy(true);
+    setPersistenceMessage("Saving case and streaming artifacts to local storage…");
+    let activeId = persistedCaseId ?? window.localStorage.getItem("atlas.currentCaseId");
+    try {
+      const selected = Array.isArray(artifacts) ? (artifacts as unknown as Array<File | { file?: File }> ) : [];
+      const pendingFiles = selected
+        .map((item) => {
+          if (typeof File !== "undefined" && item instanceof File) return item;
+          if (item && typeof item === "object" && "file" in item && item.file instanceof File) return item.file;
+          return null;
+        })
+        .filter((item): item is File => item !== null);
+      const requestedName = String(caseName ?? "").trim() || "Middleware Atlas support case";
+      if (!activeId) {
+        const created = await createCase(requestedName);
+        activeId = created.id;
+        setPersistedCaseId(activeId);
+        window.localStorage.setItem("atlas.currentCaseId", activeId);
+      } else {
+        await updateCase(activeId, requestedName);
+      }
+      let uploaded = { ...persistedFileKeys };
+      try { uploaded = { ...uploaded, ...(JSON.parse(window.localStorage.getItem(`atlas.uploadedFiles.${activeId}`) ?? "{}") as Record<string, string>) }; } catch { /* Ignore corrupt retry bookkeeping and continue. */ }
+      let savedCount = 0;
+      for (const file of pendingFiles) {
+        const key = `${file.name}::${file.size}::${file.lastModified}`;
+        if (uploaded[key]) continue;
+        const saved = await uploadArtifact(activeId, file);
+        uploaded[key] = saved.id;
+        savedCount += 1;
+        window.localStorage.setItem(`atlas.uploadedFiles.${activeId}`, JSON.stringify(uploaded));
+        setPersistedFileKeys({ ...uploaded });
+        window.dispatchEvent(new CustomEvent("atlas:case-saved", { detail: { caseId: activeId } }));
+      }
+      window.dispatchEvent(new CustomEvent("atlas:case-saved", { detail: { caseId: activeId } }));
+      setPersistenceMessage(savedCount > 0 ? `Saved case and ${savedCount} artifact${savedCount === 1 ? "" : "s"}.` : (pendingFiles.length > 0 ? "Case is up to date; selected files were already saved." : "Case saved. Add diagnostic files when ready."));
+    } catch (error) {
+      setPersistenceMessage(error instanceof Error ? `Save failed: ${error.message}` : "Save failed. Check the Rust API and retry.");
+      if (activeId) window.dispatchEvent(new CustomEvent("atlas:case-saved", { detail: { caseId: activeId } }));
+    } finally {
+      setPersistenceBusy(false);
+    }
+  };
+
+return (
     <main className="app-shell">
       <aside className={`sidebar ${showMenu ? "sidebar-open" : ""}`}>
         <a className="brand" href="#" aria-label="Middleware Atlas home">
@@ -336,14 +406,15 @@ export default function Home() {
             <div className="privacy-note"><ShieldCheck size={16} /><span><strong>Evidence-first by design</strong><br />Large dumps should be analyzed by diagnostic tools, not sent raw to an LLM.</span></div>
             <button
               className="button button-primary continue-button"
-              onClick={() => setNotice(
-                artifacts.length
-                  ? "Your files are staged in this browser session. The Rust upload API is not connected yet."
-                  : "Add at least one diagnostic artifact to continue."
-              )}
+              onClick={handlePersistCase}
             >
               Continue to case details <ArrowRight size={16} />
             </button>
+      {persistenceMessage && (
+        <div role="status" aria-live="polite" style={{ position: "fixed", left: "50%", bottom: 24, transform: "translateX(-50%)", zIndex: 9999, maxWidth: "min(640px, calc(100vw - 32px))", padding: "12px 16px", borderRadius: 12, background: "#202838", color: "white", boxShadow: "0 10px 36px rgba(20,29,48,.22)", fontSize: 13, lineHeight: 1.45 }}>
+          {persistenceBusy ? "Saving locally… " : ""}{persistenceMessage}
+        </div>
+      )}
           </div>
 
           {notice && (
