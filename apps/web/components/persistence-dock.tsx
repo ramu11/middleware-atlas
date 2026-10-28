@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { CheckCircle2, ChevronDown, ChevronUp, Database, FileText, RefreshCw, Trash2, WifiOff } from "lucide-react";
 import { apiBaseUrl, deleteArtifact, listArtifacts, listCases, type AtlasArtifact, type AtlasCase } from "@/lib/atlas-api";
 
@@ -30,9 +30,14 @@ export function PersistenceDock() {
   const [loading, setLoading] = useState(true);
   const [message, setMessage] = useState("");
 
+  const refreshGeneration = useRef(0);
+
   const refreshCases = useCallback(async (preferredId?: string) => {
+    const generation = ++refreshGeneration.current;
+    setLoading(true);
     try {
       const rows = await listCases();
+      if (generation !== refreshGeneration.current) return;
       setCases(rows);
       setOnline(true);
       const stored = typeof window !== "undefined" ? window.localStorage.getItem("atlas.currentCaseId") ?? "" : "";
@@ -51,51 +56,38 @@ export function PersistenceDock() {
       }
       setMessage("");
     } catch (error) {
+      if (generation !== refreshGeneration.current) return;
       setOnline(false);
       setMessage(error instanceof Error ? error.message : "Could not reach the local API.");
     } finally {
-      setLoading(false);
+      if (generation === refreshGeneration.current) setLoading(false);
     }
   }, []);
 
   useEffect(() => {
-    let initialLoadCancelled = false;
-    void listCases()
-      .then((rows) => {
-        if (initialLoadCancelled) return;
-        setCases(rows);
-        setOnline(true);
-        const stored = window.localStorage.getItem("atlas.currentCaseId") ?? "";
-        const selected = rows.some((row) => row.id === stored) ? stored : "";
-        setSelectedCaseId(selected);
-        if (selected) {
-          window.localStorage.setItem("atlas.currentCaseId", selected);
-          const activeCase = rows.find((row) => row.id === selected);
-          window.dispatchEvent(new CustomEvent("atlas:case-selected", {
-            detail: { caseId: selected, name: activeCase?.name ?? "" },
-          }));
-        }
-        setMessage("");
-      })
-      .catch((error: unknown) => {
-        if (initialLoadCancelled) return;
-        setOnline(false);
-        setMessage(error instanceof Error ? error.message : "Could not reach the local API.");
-      })
-      .finally(() => {
-        if (!initialLoadCancelled) setLoading(false);
-      });
+    // Defer the initial refresh past this effect's synchronous phase to satisfy React Hooks lint.
+    const initialRefreshTimer = window.setTimeout(() => {
+      void refreshCases();
+    }, 0);
     const onSaved = (event: Event) => {
       const detail = (event as CustomEvent<{ caseId?: string }>).detail;
-      setLoading(true);
-      void refreshCases(detail?.caseId);
-      if (detail?.caseId) {
-        void listArtifacts(detail.caseId)
-          .then((rows) => setArtifacts(rows))
-          .catch((error) => setMessage(error instanceof Error ? error.message : "Could not refresh artifacts."));
-      }
+      const caseId = detail?.caseId;
+      void refreshCases(caseId);
+      if (!caseId) return;
+      void listArtifacts(caseId)
+        .then((rows) => {
+          // A slow refresh for an old case must not replace the currently selected case's artifacts.
+          if (window.localStorage.getItem("atlas.currentCaseId") === caseId) setArtifacts(rows);
+        })
+        .catch((error) => {
+          if (window.localStorage.getItem("atlas.currentCaseId") === caseId) {
+            setMessage(error instanceof Error ? error.message : "Could not refresh artifacts.");
+          }
+        });
     };
     const onNewCase = () => {
+      refreshGeneration.current += 1;
+      setLoading(false);
       setSelectedCaseId("");
       setArtifacts([]);
       setMessage("New case selected. Use “Continue to case details” to save it.");
@@ -103,6 +95,8 @@ export function PersistenceDock() {
     const onCaseSelected = (event: Event) => {
       const detail = (event as CustomEvent<{ caseId?: string }>).detail;
       if (detail?.caseId) {
+        refreshGeneration.current += 1;
+        setLoading(false);
         setArtifacts([]);
         setSelectedCaseId(detail.caseId);
       }
@@ -111,7 +105,9 @@ export function PersistenceDock() {
     window.addEventListener("atlas:new-case", onNewCase);
     window.addEventListener("atlas:case-selected", onCaseSelected);
     return () => {
-      initialLoadCancelled = true;
+      // Invalidate outstanding requests so they cannot update state after unmount.
+      refreshGeneration.current += 1;
+      window.clearTimeout(initialRefreshTimer);
       window.removeEventListener("atlas:case-saved", onSaved);
       window.removeEventListener("atlas:new-case", onNewCase);
       window.removeEventListener("atlas:case-selected", onCaseSelected);

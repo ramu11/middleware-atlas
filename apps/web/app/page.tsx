@@ -9,10 +9,11 @@ import {
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent, type DragEvent } from "react";
 import { createCase, deleteArtifact, getCase, listArtifacts, updateCase, uploadArtifact, type AtlasArtifact } from "@/lib/atlas-api";
+import { AgentConversation } from "@/components/agent-conversation";
 
 type ArtifactKind =
   | "Kafka logs" | "Artemis logs" | "Heap dump" | "Thread dump"
-  | "sosreport" | "OpenShift" | "Debezium" | "Archive" | "Other";
+  | "sosreport" | "OpenShift" | "Debezium" | "Archive" | "Log / text" | "Other";
 
 type Artifact = {
   id: string;
@@ -26,8 +27,11 @@ type UploadState = {
   error?: string;
 };
 
-function fileFingerprint(file: File): string {
-  return `${file.name}::${file.size}::${file.lastModified}`;
+function createArtifactId(): string {
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+    return crypto.randomUUID();
+  }
+  return `artifact-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 }
 
 function displayKindFromApi(kind: string): ArtifactKind {
@@ -40,6 +44,7 @@ function displayKindFromApi(kind: string): ArtifactKind {
     case "openshift_bundle": return "OpenShift";
     case "debezium": return "Debezium";
     case "archive": return "Archive";
+    case "log": return "Log / text";
     default: return "Other";
   }
 }
@@ -53,19 +58,22 @@ const kindStyles: Record<ArtifactKind, string> = {
   OpenShift: "kind-openshift",
   Debezium: "kind-debezium",
   Archive: "kind-archive",
+  "Log / text": "kind-other",
   Other: "kind-other",
 };
 
 function classify(name: string): ArtifactKind {
+  // Keep preview labels aligned with config/default.toml; the API's result is canonical after upload.
   const n = name.toLowerCase();
-  if (n.endsWith(".hprof") || n.endsWith(".phd")) return "Heap dump";
-  if (/thread|javacore|\.tdump/.test(n)) return "Thread dump";
-  if (/sosreport|sosreport/.test(n)) return "sosreport";
-  if (/debezium|connector/.test(n)) return "Debezium";
-  if (/artemis|activemq|broker/.test(n)) return "Artemis logs";
-  if (/kafka|server\.log|controller\.log/.test(n)) return "Kafka logs";
-  if (/openshift|oc-|must-gather|pod|kube/.test(n)) return "OpenShift";
-  if (/\.(zip|tar|gz|tgz|xz|bz2|7z)$/.test(n)) return "Archive";
+  if ([".hprof", ".heapdump", ".phd"].some((extension) => n.endsWith(extension))) return "Heap dump";
+  if (n.includes("thread") && [".txt", ".log", ".dump"].some((extension) => n.endsWith(extension))) return "Thread dump";
+  if (n.includes("sosreport") || n.endsWith(".sos")) return "sosreport";
+  if (n.includes("debezium")) return "Debezium";
+  if (n.includes("artemis") || n.includes("activemq")) return "Artemis logs";
+  if (n.includes("kafka") || n.includes("mirrormaker") || n.includes("mirror-maker")) return "Kafka logs";
+  if (n.includes("openshift") || n.includes("must-gather") || n.includes("must_gather")) return "OpenShift";
+  if ([".tar.zst", ".zip", ".tar", ".tgz", ".gz", ".7z", ".xz", ".bz2", ".zst"].some((extension) => n.endsWith(extension))) return "Archive";
+  if ([".log", ".txt", ".out", ".err"].some((extension) => n.endsWith(extension))) return "Log / text";
   return "Other";
 }
 
@@ -101,28 +109,19 @@ export default function Home() {
   const [editingCase, setEditingCase] = useState(false);
   const [showMenu, setShowMenu] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
+  const hydrationGeneration = useRef(0);
 
   const addFiles = useCallback((incoming: FileList | File[]) => {
     const selected = Array.from(incoming);
     if (!selected.length) return;
 
-    setArtifacts((current) => {
-      const known = new Set(current.map((artifact) => fileFingerprint(artifact.file)));
-      const fresh = selected.filter((file) => {
-        const key = fileFingerprint(file);
-        if (known.has(key)) return false;
-        known.add(key);
-        return true;
-      });
-      return [
-        ...current,
-        ...fresh.map((file) => ({
-          id: `${file.name}-${file.size}-${file.lastModified}-${Math.random()}`,
-          file,
-          kind: classify(file.name),
-        })),
-      ];
-    });
+    // Never discard distinct files based on filename/size/mtime; those values can collide.
+    const additions = selected.map((file) => ({
+      id: createArtifactId(),
+      file,
+      kind: classify(file.name),
+    }));
+    setArtifacts((current) => [...current, ...additions]);
     setNotice("");
   }, []);
 
@@ -169,10 +168,11 @@ export default function Home() {
     let disposed = false;
 
     const hydrateCase = async (caseId: string, hintedName?: string) => {
+      const generation = ++hydrationGeneration.current;
       setPersistedCaseId(caseId);
       try {
         const [record, rows] = await Promise.all([getCase(caseId), listArtifacts(caseId)]);
-        if (disposed) return;
+        if (disposed || generation !== hydrationGeneration.current) return;
         setCaseName(record.name || hintedName || "New support case");
         setPersistedArtifacts(rows);
         try {
@@ -183,7 +183,7 @@ export default function Home() {
         }
         window.localStorage.setItem("atlas.currentCaseId", caseId);
       } catch (error) {
-        if (!disposed) {
+        if (!disposed && generation === hydrationGeneration.current) {
           setPersistenceMessage(error instanceof Error ? error.message : "Could not load this saved case.");
         }
       }
@@ -201,6 +201,7 @@ export default function Home() {
       if (detail?.caseId) void hydrateCase(detail.caseId);
     };
     const onNew = () => {
+      hydrationGeneration.current += 1;
       setPersistedCaseId(null);
       setPersistedArtifacts([]);
       setPersistedFileKeys({});
@@ -251,9 +252,9 @@ export default function Home() {
       let savedCount = 0;
       for (const item of artifacts) {
         const file = item.file;
-        const key = fileFingerprint(file);
+        const key = item.id;
         if (uploaded[key]) {
-          setArtifacts((current) => current.filter((candidate) => fileFingerprint(candidate.file) !== key));
+          setArtifacts((current) => current.filter((candidate) => candidate.id !== item.id));
           continue;
         }
 
@@ -268,7 +269,7 @@ export default function Home() {
           window.localStorage.setItem(`atlas.uploadedFiles.${caseId}`, JSON.stringify(uploaded));
           setPersistedFileKeys({ ...uploaded });
           setPersistedArtifacts((current) => [saved, ...current.filter((artifact) => artifact.id !== saved.id)]);
-          setArtifacts((current) => current.filter((candidate) => fileFingerprint(candidate.file) !== key));
+          setArtifacts((current) => current.filter((candidate) => candidate.id !== item.id));
           setUploadStates((current) => {
             const next = { ...current };
             delete next[key];
@@ -495,7 +496,7 @@ return (
                 </div>
                 <div className="file-list">
                   {visibleFiles.map((item) => {
-                    const key = fileFingerprint(item.file);
+                    const key = item.id;
                     const upload = uploadStates[key];
                     return (
                       <div className="file-row" key={item.id}>
@@ -558,6 +559,8 @@ return (
             </div>
             <div className="case-card-decoration"><Zap size={18} /></div>
           </section>
+
+          <AgentConversation />
 
           <div className="bottom-actions">
             <div className="privacy-note"><ShieldCheck size={16} /><span><strong>Evidence-first by design</strong><br />Large dumps should be analyzed by diagnostic tools, not sent raw to an LLM.</span></div>

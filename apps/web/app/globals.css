@@ -258,3 +258,44 @@ h1 span { color: #746ce2; }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { scroll-behavior: auto !important; transition-duration: .01ms !important; animation-duration: .01ms !important; }
 }
+
+/* Middleware Atlas agent conversation preview */
+.agent-conversation { margin-top: 24px; padding: 19px; border: 1px solid #e6e8f1; border-radius: 12px; background: #fff; box-shadow: 0 7px 22px rgba(36, 43, 73, .035); }
+.agent-conversation-header { display: flex; align-items: center; gap: 12px; }
+.agent-conversation-icon { width: 38px; height: 38px; display: grid; place-items: center; flex-shrink: 0; border-radius: 10px; background: #f0efff; color: #6e65db; }
+.agent-conversation-heading { flex: 1; min-width: 0; }
+.agent-conversation-title-row { display: flex; align-items: center; gap: 9px; flex-wrap: wrap; }
+.agent-conversation-title-row h2 { margin: 0; color: #30374d; font-size: 14px; font-weight: 700; letter-spacing: -.2px; }
+.agent-conversation-heading > p { margin: 5px 0 0; color: #838ba0; font-size: 11px; line-height: 1.5; }
+.agent-preview-badge { display: inline-flex; align-items: center; gap: 4px; padding: 4px 7px; border: 1px solid #e9e7ff; border-radius: 999px; background: #f7f6ff; color: #7067cb; font-size: 9px; font-weight: 700; white-space: nowrap; }
+.agent-connection-notice { display: flex; align-items: flex-start; gap: 10px; margin-top: 17px; padding: 12px 13px; border: 1px solid #e9e7fb; border-radius: 9px; background: #faf9ff; }
+.agent-connection-icon { display: grid; place-items: center; flex-shrink: 0; width: 30px; height: 30px; border-radius: 8px; background: #efedff; color: #6c62d4; }
+.agent-connection-notice strong { display: block; margin: 1px 0 4px; color: #4c4b73; font-size: 11px; }
+.agent-connection-notice p { margin: 0; color: #7e8198; font-size: 10px; line-height: 1.6; }
+.agent-quick-prompts { margin-top: 16px; }
+.agent-section-label { display: block; margin-bottom: 8px; color: #9299ab; font-size: 8px; font-weight: 800; letter-spacing: 1px; }
+.agent-prompt-chips { display: flex; flex-wrap: wrap; gap: 7px; }
+.agent-prompt-chip { max-width: 100%; border: 1px solid #e6e8f1; border-radius: 999px; padding: 7px 10px; background: #fff; color: #626b80; font-size: 10px; text-align: left; transition: border-color .16s, background .16s, color .16s; }
+.agent-prompt-chip:hover { border-color: #c9c5fb; background: #f8f7ff; color: #554bc8; }
+.agent-queued-prompts { display: grid; gap: 8px; margin-top: 17px; }
+.agent-draft-message { justify-self: end; max-width: min(92%, 720px); padding: 11px 13px; border: 1px solid #e4e2ff; border-radius: 11px 11px 3px 11px; background: #f6f5ff; }
+.agent-draft-label { margin-bottom: 5px; color: #766dde; font-size: 9px; font-weight: 700; }
+.agent-draft-message p { margin: 0; color: #454c62; font-size: 11px; line-height: 1.65; white-space: pre-wrap; overflow-wrap: anywhere; }
+.agent-composer { margin-top: 17px; padding: 11px; border: 1px solid #dfe2ed; border-radius: 10px; background: #fff; transition: border-color .16s, box-shadow .16s; }
+.agent-composer:focus-within { border-color: #bcb6f6; box-shadow: 0 0 0 3px rgba(102, 93, 221, .08); }
+.agent-composer-label { display: block; margin: 0 0 7px 2px; color: #626b80; font-size: 10px; font-weight: 700; }
+.agent-composer textarea { display: block; width: 100%; min-height: 100px; max-height: 280px; resize: vertical; border: 0; outline: 0; padding: 4px 2px 9px; background: transparent; color: #30374d; font-family: inherit; font-size: 12px; font-weight: 400; line-height: 1.65; }
+.agent-composer textarea::placeholder { color: #a0a6b5; }
+.agent-composer-footer { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding-top: 9px; border-top: 1px solid #f0f1f6; }
+.agent-composer-footer > span { color: #9aa0b0; font-size: 9px; line-height: 1.5; }
+.agent-queue-button { min-height: 32px; flex-shrink: 0; padding: 0 11px; font-size: 10px; }
+.agent-queue-button:disabled { cursor: not-allowed; opacity: .5; box-shadow: none; }
+.agent-composer-status { margin: 10px 1px 0; color: #777f95; font-size: 10px; line-height: 1.55; }
+@media (max-width: 600px) {
+  .agent-conversation { padding: 14px 12px; }
+  .agent-conversation-header { align-items: flex-start; }
+  .agent-conversation-title-row h2 { font-size: 12px; }
+  .agent-composer-footer { align-items: flex-start; flex-direction: column; }
+  .agent-queue-button { width: 100%; }
+  .agent-draft-message { max-width: 100%; }
+}
