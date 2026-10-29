@@ -8,6 +8,10 @@ pub const CASES_ROUTE: &str = "/api/v1/cases";
 pub const CASE_ROUTE: &str = "/api/v1/cases/{case_id}";
 pub const CASE_ARTIFACTS_ROUTE: &str = "/api/v1/cases/{case_id}/artifacts";
 pub const ARTIFACT_ROUTE: &str = "/api/v1/cases/{case_id}/artifacts/{artifact_id}";
+pub const DIAGNOSTIC_PREPARE_ROUTE: &str = "/api/v1/cases/{case_id}/diagnostics/prepare";
+pub const HEAP_OPERATION_ROUTE: &str = "/api/v1/cases/{case_id}/diagnostics/heap/{operation}";
+pub const AGENT_CHAT_ROUTE: &str = "/api/v1/cases/{case_id}/agent/chat";
+pub const AGENT_MESSAGES_ROUTE: &str = "/api/v1/cases/{case_id}/agent/messages";
 
 pub const HEALTH_STATUS_OK: &str = "ok";
 pub const ARTIFACTS_DIR: &str = "artifacts";

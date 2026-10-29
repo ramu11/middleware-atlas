@@ -1,6 +1,6 @@
 # Configuration and local data layout
 
-Middleware Atlas loads `config/default.toml` at startup. This file contains non-secret application settings and the artifact/product classification rules. Environment variables override supported settings; secrets such as the Dify API key stay in the local `.env` file and are never placed in TOML or committed.
+Middleware Atlas loads `config/default.toml` at startup. This file contains non-secret application settings and the artifact/product classification rules. Environment variables override supported settings; secrets such as the local Ollama endpoint stay in the local `.env` file and are never placed in TOML or committed.
 
 ## Project-relative paths
 

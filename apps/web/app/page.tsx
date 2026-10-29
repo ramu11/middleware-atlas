@@ -1,14 +1,17 @@
 "use client";
 
 import {
-  Activity, ArrowDownToLine, ArrowRight, Atom, Boxes, Check, ChevronDown,
-  CircleHelp, Clock3, CloudUpload, Command, FileArchive, FileCode2,
-  FileSearch, FileText, FolderOpen, HardDrive, Layers3, LifeBuoy, Menu,
-  MessageSquareText, Network, Plus, Search, Server, ShieldCheck, Trash2,
-  Upload, X, Zap,
+  Activity, ArrowDownToLine, Atom, Boxes,
+  Check, ChevronDown, CircleHelp, Clock3,
+  CloudUpload, Command, FileArchive, FileCode2,
+  FileSearch, FileText, FolderOpen, HardDrive,
+  Layers3, LifeBuoy, Menu, Network,
+  Plus, Search, Server, ShieldCheck,
+  Trash2, Upload, X,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent, type DragEvent } from "react";
-import { createCase, deleteArtifact, getCase, listArtifacts, updateCase, uploadArtifact, type AtlasArtifact } from "@/lib/atlas-api";
+import { useCallback, useMemo, useRef, useState, type ChangeEvent, type DragEvent } from "react";
+import { sha256Blob } from "@/lib/sha256-stream";
+import { createCase, listArtifacts, listCases, prepareDiagnostics, uploadArtifact, type AtlasArtifact } from "@/lib/atlas-api";
 import { AgentConversation } from "@/components/agent-conversation";
 
 type ArtifactKind =
@@ -66,7 +69,7 @@ function classify(name: string): ArtifactKind {
   // Keep preview labels aligned with config/default.toml; the API's result is canonical after upload.
   const n = name.toLowerCase();
   if ([".hprof", ".heapdump", ".phd"].some((extension) => n.endsWith(extension))) return "Heap dump";
-  if (n.includes("thread") && [".txt", ".log", ".dump"].some((extension) => n.endsWith(extension))) return "Thread dump";
+  if (["thread", "javacore", "threaddump"].some((token) => n.includes(token)) && [".txt", ".log", ".dump", ".tdump"].some((extension) => n.endsWith(extension))) return "Thread dump";
   if (n.includes("sosreport") || n.endsWith(".sos")) return "sosreport";
   if (n.includes("debezium")) return "Debezium";
   if (n.includes("artemis") || n.includes("activemq")) return "Artemis logs";
@@ -105,11 +108,9 @@ export default function Home() {
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState("All files");
   const [notice, setNotice] = useState("");
-  const [caseName, setCaseName] = useState("New support case");
-  const [editingCase, setEditingCase] = useState(false);
   const [showMenu, setShowMenu] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
-  const hydrationGeneration = useRef(0);
+  const [agentSessionCaseId, setAgentSessionCaseId] = useState<string | null>(null);
 
   const addFiles = useCallback((incoming: FileList | File[]) => {
     const selected = Array.from(incoming);
@@ -161,113 +162,139 @@ export default function Home() {
 
     const [persistenceBusy, setPersistenceBusy] = useState(false);
   const [persistenceMessage, setPersistenceMessage] = useState("");
-  const [persistedCaseId, setPersistedCaseId] = useState<string | null>(null);
-  const [persistedFileKeys, setPersistedFileKeys] = useState<Record<string, string>>({});
 
-  useEffect(() => {
-    let disposed = false;
 
-    const hydrateCase = async (caseId: string, hintedName?: string) => {
-      const generation = ++hydrationGeneration.current;
-      setPersistedCaseId(caseId);
-      try {
-        const [record, rows] = await Promise.all([getCase(caseId), listArtifacts(caseId)]);
-        if (disposed || generation !== hydrationGeneration.current) return;
-        setCaseName(record.name || hintedName || "New support case");
-        setPersistedArtifacts(rows);
-        try {
-          const raw = window.localStorage.getItem(`atlas.uploadedFiles.${caseId}`) ?? "{}";
-          setPersistedFileKeys(JSON.parse(raw) as Record<string, string>);
-        } catch {
-          setPersistedFileKeys({});
-        }
-        window.localStorage.setItem("atlas.currentCaseId", caseId);
-      } catch (error) {
-        if (!disposed && generation === hydrationGeneration.current) {
-          setPersistenceMessage(error instanceof Error ? error.message : "Could not load this saved case.");
-        }
-      }
-    };
 
-    const activeCaseId = window.localStorage.getItem("atlas.currentCaseId");
-    if (activeCaseId) void hydrateCase(activeCaseId);
+  const handlePrepareDiagnostics = async (problemDescription: string) => {
+    const problem = problemDescription.trim();
+    if (!problem) throw new Error("Describe the problem before starting analysis.");
+    if (persistenceBusy) throw new Error("An upload or save is already in progress. Wait for it to finish, then retry.");
 
-    const onSelected = (event: Event) => {
-      const detail = (event as CustomEvent<{ caseId?: string; name?: string }>).detail;
-      if (detail?.caseId) void hydrateCase(detail.caseId, detail.name);
-    };
-    const onSaved = (event: Event) => {
-      const detail = (event as CustomEvent<{ caseId?: string }>).detail;
-      if (detail?.caseId) void hydrateCase(detail.caseId);
-    };
-    const onNew = () => {
-      hydrationGeneration.current += 1;
-      setPersistedCaseId(null);
-      setPersistedArtifacts([]);
-      setPersistedFileKeys({});
-      setCaseName("New support case");
-      setPersistenceMessage("New case selected. Continue to save it and upload any staged files.");
-    };
-
-    window.addEventListener("atlas:case-selected", onSelected);
-    window.addEventListener("atlas:case-saved", onSaved);
-    window.addEventListener("atlas:new-case", onNew);
-    return () => {
-      disposed = true;
-      window.removeEventListener("atlas:case-selected", onSelected);
-      window.removeEventListener("atlas:case-saved", onSaved);
-      window.removeEventListener("atlas:new-case", onNew);
-    };
-  }, []);
-
-  const handlePersistCase = async () => {
-    if (persistenceBusy) return;
+    // The case ID is an internal implementation detail. Start a private incident
+    // workspace automatically for this conversation; never ask the customer for an ID.
+    const isDiagnosticDump = (kind: string) => kind === "Heap dump" || kind === "Thread dump";
+    let caseId: string | null = agentSessionCaseId;
+    try {
+      const restoredCaseId = window.localStorage.getItem("atlas.agent.activeCaseId");
+      if (restoredCaseId) { caseId = restoredCaseId; setAgentSessionCaseId(restoredCaseId); window.sessionStorage.setItem("atlas.agentSessionCaseId", restoredCaseId); }
+    } catch { /* storage can be disabled by browser policy */ }
+    if (!caseId) {
+      try { caseId = window.sessionStorage.getItem("atlas.agentSessionCaseId"); } catch { /* session persistence may be disabled */ }
+      if (caseId) setAgentSessionCaseId(caseId);
+    }
     setPersistenceBusy(true);
-    setPersistenceMessage("Saving case details…");
-    let activeId = persistedCaseId ?? window.localStorage.getItem("atlas.currentCaseId");
+    setPersistenceMessage("Preparing the incident workspace and saving uploaded evidence…");
 
     try {
-      const requestedName = caseName.trim() || "Middleware Atlas support case";
-      if (!activeId) {
-        const created = await createCase(requestedName);
-        activeId = created.id;
-        setPersistedCaseId(created.id);
-        window.localStorage.setItem("atlas.currentCaseId", created.id);
-      } else {
-        await updateCase(activeId, requestedName);
-      }
-
-      if (!activeId) throw new Error("Could not resolve the active case identifier.");
-      const caseId: string = activeId;
-      let uploaded: Record<string, string> = { ...persistedFileKeys };
-      try {
-        uploaded = {
-          ...uploaded,
-          ...(JSON.parse(window.localStorage.getItem(`atlas.uploadedFiles.${caseId}`) ?? "{}") as Record<string, string>),
-        };
-      } catch {
-        // A corrupt retry marker must not prevent the user from saving the case.
-      }
-
-      let savedCount = 0;
-      for (const item of artifacts) {
-        const file = item.file;
-        const key = item.id;
-        if (uploaded[key]) {
-          setArtifacts((current) => current.filter((candidate) => candidate.id !== item.id));
-          continue;
-        }
-
-        setUploadStates((current) => ({ ...current, [key]: { status: "uploading", progress: 0 } }));
-        setPersistenceMessage(`Uploading ${file.name} · 0%`);
-        try {
-          const saved = await uploadArtifact(caseId, file, (percent) => {
-            setUploadStates((current) => ({ ...current, [key]: { status: "uploading", progress: percent } }));
-            setPersistenceMessage(`Uploading ${file.name} · ${percent}%`);
+      const computedDigests = new Map<string, string>();
+      let savedArtifacts: AtlasArtifact[] = caseId ? await listArtifacts(caseId) : [];
+      if (!caseId && artifacts.some((item) => isDiagnosticDump(item.kind))) {
+        // Look through existing internal incidents before creating another case or re-uploading a dump.
+        // Filename/kind/size narrow candidates first; only candidates are hashed, in a stream.
+        const previousCases = await listCases();
+        const previousArtifactSets = await Promise.all(previousCases.map(async (previousCase) => ({
+          caseId: previousCase.id,
+          artifacts: await listArtifacts(previousCase.id),
+        })));
+        for (const item of artifacts.filter((candidate) => isDiagnosticDump(candidate.kind))) {
+          const expectedKind = item.kind === "Heap dump" ? "heap_dump" : "thread_dump";
+          const sameSizeCandidates = previousArtifactSets.flatMap((set) => set.artifacts
+            .filter((artifact) => artifact.kind === expectedKind
+              && artifact.filename === item.file.name
+              && artifact.size_bytes === item.file.size)
+            .map((artifact) => ({ caseId: set.caseId, artifact, artifacts: set.artifacts })));
+          if (sameSizeCandidates.length === 0) continue;
+          setPersistenceMessage(`Checking whether ${item.file.name} already exists in local storage…`);
+          let lastHashPercent = -1;
+          const digest = await sha256Blob(item.file, (percent) => {
+            if (percent !== lastHashPercent) {
+              lastHashPercent = percent;
+              setPersistenceMessage(`Checking ${item.file.name} for an existing copy · ${percent}%`);
+            }
           });
-          uploaded[key] = saved.id;
-          window.localStorage.setItem(`atlas.uploadedFiles.${caseId}`, JSON.stringify(uploaded));
-          setPersistedFileKeys({ ...uploaded });
+          computedDigests.set(item.id, digest);
+          const existing = sameSizeCandidates.find((candidate) =>
+            candidate.artifact.sha256.toLowerCase() === digest.toLowerCase()
+          );
+          if (existing) {
+            caseId = existing.caseId;
+            savedArtifacts = existing.artifacts;
+            setAgentSessionCaseId(existing.caseId);
+            try { window.sessionStorage.setItem("atlas.agentSessionCaseId", existing.caseId); window.localStorage.setItem("atlas.agent.activeCaseId", existing.caseId); } catch { /* session persistence may be disabled */ }
+            setPersistedArtifacts(savedArtifacts);
+            setPersistenceMessage(`${item.file.name} already exists locally; reusing its internal incident and saved artifact.`);
+            break;
+          }
+        }
+      }
+      if (!caseId) {
+        if (!artifacts.some((item) => isDiagnosticDump(item.kind))) {
+          throw new Error("Attach a recognized heap dump (.hprof, .phd, .heapdump) or thread dump before starting a new analysis.");
+        }
+        const compactProblem = problem.replace(/\s+/g, " ");
+        const title = `Incident: ${compactProblem}`.slice(0, 140);
+        const created = await createCase(title);
+        caseId = created.id;
+        setAgentSessionCaseId(created.id);
+        try { window.localStorage.setItem("atlas.agent.activeCaseId", created.id); } catch { /* local session storage may be disabled */ }
+        try { window.sessionStorage.setItem("atlas.agentSessionCaseId", created.id); } catch { /* session persistence may be disabled */ }
+        setPersistedArtifacts([]);
+      }
+
+      const targetCaseId = caseId;
+      if (!targetCaseId) throw new Error("Atlas could not create the internal incident workspace.");
+
+      // Upload all staged evidence sequentially into the internally-created incident.
+      // Successful files are removed from the staged queue, so a retry after partial
+      // failure reuses the same internal case and does not upload successful files twice.
+      const newlyUploadedArtifactIds: string[] = [];
+      for (const item of artifacts) {
+        const key = item.id;
+        // Skip an artifact only after its full content SHA-256 matches an artifact already saved in this incident.
+        // Hash only when an existing artifact has the same byte size; different sizes cannot be identical files.
+        const expectedKind = item.kind === "Heap dump" ? "heap_dump" : item.kind === "Thread dump" ? "thread_dump" : null;
+        const sameSizeCandidates = savedArtifacts.filter((artifact) =>
+          artifact.filename === item.file.name
+          && artifact.size_bytes === item.file.size
+          && (expectedKind === null || artifact.kind === expectedKind)
+        );
+        if (sameSizeCandidates.length > 0) {
+          setPersistenceMessage(`Checking whether ${item.file.name} is already stored…`);
+          let digest = computedDigests.get(item.id);
+          if (!digest) {
+            let lastHashPercent = -1;
+            digest = await sha256Blob(item.file, (percent) => {
+              if (percent !== lastHashPercent) {
+                lastHashPercent = percent;
+                setPersistenceMessage(`Checking ${item.file.name} for a duplicate · ${percent}%`);
+              }
+            });
+            computedDigests.set(item.id, digest);
+          }
+          const existing = sameSizeCandidates.find((artifact) => artifact.sha256.toLowerCase() === digest.toLowerCase());
+          if (existing) {
+            savedArtifacts = [existing, ...savedArtifacts.filter((artifact) => artifact.id !== existing.id)];
+            newlyUploadedArtifactIds.push(existing.id);
+            setPersistedArtifacts((current) => [existing, ...current.filter((artifact) => artifact.id !== existing.id)]);
+            setArtifacts((current) => current.filter((candidate) => candidate.id !== item.id));
+            setUploadStates((current) => {
+              const next = { ...current };
+              delete next[key];
+              return next;
+            });
+            setPersistenceMessage(`${item.file.name} already exists in this incident; reused the saved artifact without uploading it again.`);
+            continue;
+          }
+        }
+        setUploadStates((current) => ({ ...current, [key]: { status: "uploading", progress: 0 } }));
+        setPersistenceMessage(`Saving ${item.file.name} to the incident workspace…`);
+        try {
+          const saved = await uploadArtifact(targetCaseId, item.file, (percent) => {
+            setUploadStates((current) => ({ ...current, [key]: { status: "uploading", progress: percent } }));
+            setPersistenceMessage(`Uploading ${item.file.name} · ${percent}%`);
+          });
+          savedArtifacts = [saved, ...savedArtifacts.filter((artifact) => artifact.id !== saved.id)];
+          newlyUploadedArtifactIds.push(saved.id);
           setPersistedArtifacts((current) => [saved, ...current.filter((artifact) => artifact.id !== saved.id)]);
           setArtifacts((current) => current.filter((candidate) => candidate.id !== item.id));
           setUploadStates((current) => {
@@ -275,58 +302,33 @@ export default function Home() {
             delete next[key];
             return next;
           });
-          savedCount += 1;
-          window.dispatchEvent(new CustomEvent("atlas:case-saved", { detail: { caseId } }));
         } catch (error) {
-          const message = error instanceof Error ? error.message : "Upload failed. Check the API and retry.";
+          const message = error instanceof Error ? error.message : "Upload failed. Check the local API and retry.";
           setUploadStates((current) => ({ ...current, [key]: { status: "failed", progress: 0, error: message } }));
-          throw new Error(`Could not upload ${file.name}: ${message}`);
+          throw new Error(`Could not upload ${item.file.name}: ${message}`);
         }
       }
 
-      window.dispatchEvent(new CustomEvent("atlas:case-saved", { detail: { caseId: activeId } }));
-      setPersistenceMessage(
-        savedCount > 0
-          ? `Saved case and uploaded ${savedCount} artifact${savedCount === 1 ? "" : "s"}.`
-          : artifacts.length > 0
-            ? "Case saved. Selected files were already uploaded for this case."
-            : "Case saved. Add diagnostic artifacts whenever you're ready.",
-      );
+      savedArtifacts = await listArtifacts(targetCaseId);
+      const diagnosticArtifacts = savedArtifacts.filter((artifact) => (artifact.kind === "heap_dump" || artifact.kind === "thread_dump") && (newlyUploadedArtifactIds.length === 0 || newlyUploadedArtifactIds.includes(artifact.id)));
+      if (!diagnosticArtifacts.length) {
+        throw new Error("No supported heap or thread dump was identified among the saved files. Check the file extensions and try again.");
+      }
+
+      setPersistedArtifacts(savedArtifacts);
+      setPersistenceMessage("Evidence saved. Starting the matching diagnostic plugin…");
+      const result = await prepareDiagnostics(targetCaseId, problem, diagnosticArtifacts.map((artifact) => artifact.id));
+      setPersistenceMessage(`Diagnostic workflow finished with ${result.preparations.length} plugin result(s). Review each status and warning to confirm whether MAT actually ran.`);
+      return result;
     } catch (error) {
-      setPersistenceMessage(error instanceof Error ? `Save failed: ${error.message}` : "Save failed. Check the Rust API and retry.");
-      if (activeId) window.dispatchEvent(new CustomEvent("atlas:case-saved", { detail: { caseId: activeId } }));
+      const message = error instanceof Error ? error.message : "Could not prepare diagnostic files. Check the local API and retry.";
+      setPersistenceMessage(message);
+      throw error;
     } finally {
       setPersistenceBusy(false);
     }
   };
 
-  const handleDeletePersistedArtifact = async (artifact: AtlasArtifact) => {
-    const caseId = persistedCaseId ?? artifact.case_id;
-    if (!caseId) return;
-    if (!window.confirm(`Delete ${artifact.filename} from this case and remove its local file?`)) return;
-    try {
-      await deleteArtifact(caseId, artifact.id);
-      setPersistedArtifacts((current) => current.filter((item) => item.id !== artifact.id));
-      try {
-        const key = `atlas.uploadedFiles.${caseId}`;
-        const raw = window.localStorage.getItem(key);
-        if (raw) {
-          const markers = JSON.parse(raw) as Record<string, string>;
-          for (const [fingerprint, savedId] of Object.entries(markers)) {
-            if (savedId === artifact.id) delete markers[fingerprint];
-          }
-          window.localStorage.setItem(key, JSON.stringify(markers));
-          setPersistedFileKeys(markers);
-        }
-      } catch {
-        // Server-side deletion remains authoritative if retry bookkeeping is malformed.
-      }
-      setPersistenceMessage(`Deleted ${artifact.filename} from local storage.`);
-      window.dispatchEvent(new CustomEvent("atlas:case-saved", { detail: { caseId } }));
-    } catch (error) {
-      setPersistenceMessage(error instanceof Error ? `Delete failed: ${error.message}` : "Could not delete the artifact.");
-    }
-  };
 return (
     <main className="app-shell">
       <aside className={`sidebar ${showMenu ? "sidebar-open" : ""}`}>
@@ -532,7 +534,7 @@ return (
                         </div>
                         <span className={`kind-badge ${kindStyles[kind]}`}>{kind}</span>
                         <span className="file-ready"><Check size={13} /> Stored</span>
-                        <button className="icon-button remove-file" title={`Delete ${item.filename} from local storage`} aria-label={`Delete ${item.filename}`} onClick={() => void handleDeletePersistedArtifact(item)}><Trash2 size={16} /></button>
+
                       </div>
                     );
                   })}
@@ -543,35 +545,11 @@ return (
             )}
           </section>
 
-          <section className="case-card">
-            <div className="case-card-icon"><MessageSquareText size={18} /></div>
-            <div className="case-card-content">
-              <div className="case-card-title">
-                <h2>Give this investigation a name</h2>
-                <span className="optional-pill">OPTIONAL</span>
-              </div>
-              {editingCase ? (
-                <input className="case-name-input" value={caseName} autoFocus onChange={(e) => setCaseName(e.target.value)} onBlur={() => setEditingCase(false)} onKeyDown={(e) => { if (e.key === "Enter") setEditingCase(false); }} aria-label="Investigation name" />
-              ) : (
-                <button className="case-name-button" onClick={() => setEditingCase(true)} title="Click to rename">{caseName} <span>Edit</span></button>
-              )}
-              <p>A case name makes it easier to keep your investigation organized.</p>
-            </div>
-            <div className="case-card-decoration"><Zap size={18} /></div>
-          </section>
-
-          <AgentConversation />
+          <AgentConversation onPrepare={handlePrepareDiagnostics} hasStagedFiles={artifacts.length > 0} onNewInvestigation={() => { setAgentSessionCaseId(null); try { window.sessionStorage.removeItem("atlas.agentSessionCaseId"); window.localStorage.removeItem("atlas.agent.activeCaseId"); } catch { /* storage can be disabled */ } }} />
 
           <div className="bottom-actions">
             <div className="privacy-note"><ShieldCheck size={16} /><span><strong>Evidence-first by design</strong><br />Large dumps should be analyzed by diagnostic tools, not sent raw to an LLM.</span></div>
-            <button
-              className="button button-primary continue-button"
-              onClick={handlePersistCase}
-              disabled={persistenceBusy}
-              aria-busy={persistenceBusy}
-            >
-              {persistenceBusy ? "Saving…" : "Save case & upload artifacts"} {!persistenceBusy && <ArrowRight size={16} />}
-            </button>
+
       {persistenceMessage && (
         <div role="status" aria-live="polite" style={{ position: "fixed", left: "50%", bottom: 24, transform: "translateX(-50%)", zIndex: 9999, maxWidth: "min(640px, calc(100vw - 32px))", padding: "12px 16px", borderRadius: 12, background: "#202838", color: "white", boxShadow: "0 10px 36px rgba(20,29,48,.22)", fontSize: 13, lineHeight: 1.45 }}>
           {persistenceBusy ? "Saving locally… " : ""}{persistenceMessage}

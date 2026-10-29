@@ -6,7 +6,7 @@
 
 Provides case management, artifact upload, analysis progress, chat, report
 viewing and evidence-linked findings. It talks only to the Rust application
-API. Dify credentials and filesystem paths never reach the browser.
+API. Local model configuration and filesystem paths never reach the browser.
 
 ### Rust application backend
 
@@ -17,35 +17,21 @@ Rust is the primary application and security boundary. It owns:
 - Upload validation and artifact storage.
 - Background job lifecycle, cancellation and progress.
 - Tool adapter registry and input validation.
-- Dify API client and application-level workflow invocation.
+- Loopback-only Ollama client and application-level agent orchestration.
 - Evidence/finding schemas, audit records and retention rules.
 - Resource limits for diagnostic subprocesses.
 
-### Dify
+### Local inference and agent orchestration
 
-Dify provides configurable AI application/workflow orchestration, knowledge
-retrieval and access to configured model providers. Integrate through the
-documented API for the selected Dify deployment/version.
+The Rust API talks directly to a local Ollama service on loopback. It rejects non-loopback model URLs, disables HTTP proxies and redirects, and verifies the requested model is available in the local Ollama model list before sending any incident context. Use locally pulled model weights only; do not use cloud models.
 
-Keep Dify's base URL and API key configurable. API keys must be stored in
-server-side environment/secrets configuration, never in frontend code or Git.
+The model is not an authorization boundary. Deterministic Rust routing chooses approved diagnostic plugins from uploaded artifact kinds and explicit operations. Model responses may explain evidence and ask follow-up questions, but may not invent filesystem paths, shell commands, or tool permissions.
 
-Use Dify for model/workflow flexibility, not as the sole authorization boundary.
-The Rust backend must independently authorize every artifact and tool operation.
-
-### Model providers
-
-The model is configured in Dify. The application must not assume a specific
-model family or provider payload format. Local Qwen inference is one option
-when exposed through a provider/interface supported by the deployed Dify
-version.
-
-Validate tool calling, structured output, context limits and streaming for
-each provider/model combination. Degrade gracefully if a model lacks a feature.
+Conversation turns and bounded evidence context remain on the local machine. The raw heap dump and MAT indexes are never included in model requests.
 
 ## 2. Pluggable tool architecture
 
-Define a versioned tool contract independent of Dify and any one model.
+Define a versioned tool contract independent of local Ollama and any one model.
 
 Conceptual request:
 
@@ -91,33 +77,17 @@ Do not let the model construct arbitrary shell commands or filesystem paths.
 The Rust service maps authorized internal IDs to validated files and executes
 only configured operations.
 
-## 3. Dify integration patterns
+## 3. Local agent orchestration
 
-### Application workflow
+The agent combines a fixed system policy, recent conversation turns from SQLite, bounded MAT/thread-dump evidence, and the current user question. Evidence is labelled untrusted input. Responses should separate observed facts, hypotheses, confidence, alternative explanations, and verification steps. If evidence is insufficient, the agent asks for specific missing information.
 
-The Rust backend submits a case question and bounded context to a configured
-Dify application/workflow using the supported API. It tracks the workflow run
-and returns results to the UI.
+### Tool routing
 
-### Tool execution
+Rust routes uploaded `.hprof`/`.phd`/`.heapdump` artifacts to the MAT adapter and thread dumps to the JVM thread-dump adapter. The tool registry has fixed operation IDs and validated parameters. Model content cannot invoke arbitrary commands or alter container permissions.
 
-Where a Dify workflow needs a diagnostic tool, expose only approved operations
-through a secured integration supported by the chosen Dify version. That
-integration calls the Rust tool service or a dedicated restricted tool service.
+### Evidence retrieval
 
-The Rust service validates the user, case, artifact, operation and parameters
-before executing anything. Never treat a model-generated tool request as
-authorization.
-
-### Knowledge retrieval
-
-Use Dify knowledge features where they fit the desired ingestion and retrieval
-workflow. Keep source metadata such as product, version, document kind, source
-URL and update date. For exact exception strings, class names and configuration
-keys, evaluate keyword retrieval alongside semantic retrieval.
-
-Do not place private customer artifacts into shared knowledge without explicit
-sanitization and review.
+Local retrieval is implemented as bounded extraction from MAT ZIP archives, text/CSV/HTML reports, thread-dump summaries, the incident description, and manifests. It limits excerpt size and count, ignores symlinks, excludes raw heap dumps/indexes, and is not a general-purpose web or remote knowledge retrieval client.
 
 ## 4. Eclipse MAT integration
 
@@ -160,7 +130,7 @@ without sufficient evidence and engineering review.
 
 ## 6. Security and reliability
 
-- Use server-side secrets for Dify and model-provider credentials.
+- Use server-side secrets for local Ollama and model-provider credentials.
 - Enforce authorization on every case, artifact and tool operation.
 - Treat logs, archives, HTML reports and model output as untrusted.
 - Defend against path traversal, symlinks and decompression bombs.

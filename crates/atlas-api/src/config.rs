@@ -277,7 +277,7 @@ fn configured_project_dir() -> Result<PathBuf, Box<dyn Error>> {
 
 fn configured_config_path(project_dir: &Path) -> PathBuf {
     let configured = nonempty_env("ATLAS_CONFIG_FILE")
-        .map(|value| PathBuf::from(value))
+        .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("config/default.toml"));
     resolve_path(project_dir, &configured)
 }
@@ -311,10 +311,10 @@ fn expand_home(path: &Path) -> PathBuf {
             .map(PathBuf::from)
             .unwrap_or_else(|| path.to_path_buf());
     }
-    if let Some(rest) = value.strip_prefix("~/") {
-        if let Some(home) = env::var_os("HOME") {
-            return PathBuf::from(home).join(rest);
-        }
+    if let Some(rest) = value.strip_prefix("~/")
+        && let Some(home) = env::var_os("HOME")
+    {
+        return PathBuf::from(home).join(rest);
     }
     path.to_path_buf()
 }

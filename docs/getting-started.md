@@ -1,7 +1,7 @@
 <!-- maintained-by: patch_project_docs.py -->
 # Getting started: run Middleware Atlas locally
 
-This guide describes how to run the current local-development version of Middleware Atlas. At this checkpoint, the working slice is the **case intake UI + Rust API + SQLite metadata + local artifact files**. Dify-driven analysis and Eclipse MAT execution are planned integrations, not functioning agent features yet.
+This guide describes how to run the current local-development version of Middleware Atlas. At this checkpoint, the working slice is the **case intake UI + Rust API + SQLite metadata + local artifact files**. Local Ollama chat and Eclipse MAT execution are supported by the local agent workflow when configured.
 
 ## 1. Components and software you need
 
@@ -85,7 +85,7 @@ If the UI needs a different API address, create `apps/web/.env.local` from `apps
 NEXT_PUBLIC_ATLAS_API_BASE_URL=http://127.0.0.1:8080
 ```
 
-`NEXT_PUBLIC_*` values are exposed to the browser. Do not put secrets or Dify API keys in them.
+`NEXT_PUBLIC_*` values are exposed to the browser. Do not put secrets or inference credentials in them.
 
 ## 4. Verify the API is running
 
@@ -155,7 +155,16 @@ Run all checks after UI, configuration, schema, or API changes. Commit `Cargo.lo
 ## 8. Current boundaries (important)
 
 - **Implemented now:** case CRUD endpoints, product-aware file metadata, streaming artifact upload, size limit, SHA-256, local filesystem storage, SQLite migrations, and the case-intake/persistence UI.
-- **Not connected yet:** Dify workflow/chat invocation, real diagnostic analyzer jobs, Eclipse MAT execution, report/evidence explorer, and end-to-end root-cause analysis.
-- `ATLAS_DIFY_*` and `ATLAS_MAT_*` entries in `.env.example` are configuration placeholders at this stage; they do not mean those integrations are active.
+- **Implemented now:** case CRUD endpoints, product-aware file metadata, streaming artifact upload, size limit, SHA-256, local filesystem storage, SQLite migrations, case-intake/persistence UI, and local heap/thread dump preparation plugins. The thread plugin writes a bounded summary; the heap plugin prepares an Eclipse MAT request workspace.
+- **Not connected yet:** Dify workflow/chat invocation, actual Eclipse MAT execution, background analysis jobs, report/evidence explorer, and end-to-end root-cause analysis.
+- `ATLAS_DIFY_*` and `ATLAS_MAT_*` entries in `.env.example` are configuration placeholders; they do not mean those integrations are active.
 
 Further reading: [Component map](components.md), [Architecture](architecture.md), [Configuration](configuration.md), and [Persistence/API](persistence.md).
+
+## Automatic Eclipse MAT Docker execution
+
+When the diagnostic agent receives a heap dump through the UI, it creates an internal incident ID automatically, checks for a usable Docker or Podman runtime, builds the pinned Eclipse MAT image on first use (unless the image already exists in that runtime), copies the heap dump into a private workspace, and runs fixed MAT operations in a constrained one-shot container, and writes reports plus `llm-context.md` under `data/work/<case-id>/heap/<artifact-id>/` so MAT index files can be reused for follow-up queries. The isolated input copy needs additional free disk space roughly equal to the source dump size. If neither Docker nor Podman is available, the API reports that MAT was not executed rather than claiming a successful analysis. Set ATLAS_MAT_RUNTIME=auto (default), docker, or podman to control runtime selection. See [persistence.md](persistence.md#eclipse-mat-docker-operations) for the named operations and resource settings. The LLM context is prepared locally. Optional Dify synthesis for any named operation runs only if `ATLAS_DIFY_SEND_HEAP_CONTEXT=true` and server-side `ATLAS_DIFY_API_KEY` and `ATLAS_DIFY_BASE_URL` are configured. These endpoints expose the operations but do not, by themselves, configure a Dify workflow to invoke tools autonomously.
+
+## Local-only diagnostic-agent chat
+
+Install and start Ollama locally, run `ollama pull qwen3:8b`, and configure `ATLAS_LLM_BASE_URL=http://127.0.0.1:11434`, `ATLAS_LLM_MODEL=qwen3:8b`, and `ATLAS_LLM_SEND_HEAP_CONTEXT=true` in the root `.env`. The Rust API rejects non-loopback model URLs, blocks proxies and redirects, and verifies that the configured model exists in Ollama's local model list. Conversation history and bounded evidence remain on this machine; raw heap dumps and MAT indexes are excluded. Restart the API after changing `.env`.

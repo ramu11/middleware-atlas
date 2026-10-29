@@ -37,8 +37,8 @@ match_mode = "any"
 [[diagnostics.artifact_rules]]
 kind = "thread_dump"
 product = "Java / JVM"
-contains_any = ["thread"]
-extensions = [".txt", ".log", ".dump"]
+contains_any = ["thread", "javacore", "threaddump"]
+extensions = [".txt", ".log", ".dump", ".tdump"]
 match_mode = "all"
 
 [[diagnostics.artifact_rules]]

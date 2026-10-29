@@ -1,0 +1,66 @@
+#!/bin/sh
+set -eu
+
+if [ "$#" -lt 2 ]; then
+  echo "usage: mat-job /work/input/heap.hprof OPERATION [OPERATION_ARGS...]" >&2
+  exit 64
+fi
+INPUT="$1"
+OPERATION="$2"
+shift 2
+[ -f "$INPUT" ] || { echo "MAT input file not found: $INPUT" >&2; exit 66; }
+LAUNCHER="$(find /opt/mat -type f -name 'org.eclipse.equinox.launcher_*.jar' -print -quit)"
+[ -n "$LAUNCHER" ] || { echo "MAT Equinox launcher was not found" >&2; exit 69; }
+run_mat() {
+  java "-Xmx${MAT_JAVA_MAX_HEAP:-4g}" -Djava.awt.headless=true -jar "$LAUNCHER" \
+    -configuration /tmp/mat-configuration -data /tmp/mat-workspace \
+    -consoleLog -application org.eclipse.mat.api.parse "$@"
+}
+query() {
+  run_mat "$INPUT" "$@" -format=txt -unzip org.eclipse.mat.api:query
+}
+case "$OPERATION" in
+  analyze_heap_dump)
+    run_mat "$INPUT" -format=txt -unzip org.eclipse.mat.api:suspects
+    run_mat "$INPUT" -format=txt -unzip org.eclipse.mat.api:overview
+    query "-command=histogram"
+    query "-command=dominator_tree -limit=${1:-50}"
+    run_mat "$INPUT" -format=txt -unzip org.eclipse.mat.api:top_components
+    ;;
+  generate_leak_suspects)
+    run_mat "$INPUT" -format=txt -unzip org.eclipse.mat.api:suspects
+    ;;
+  generate_heap_overview)
+    run_mat "$INPUT" -format=txt -unzip org.eclipse.mat.api:overview
+    ;;
+  get_histogram)
+    query "-command=histogram"
+    ;;
+  get_dominator_tree)
+    query "-command=dominator_tree -limit=${1:-50}"
+    ;;
+  find_paths_to_gc_roots)
+    OBJECT_ID="${1:?object id is required}"
+    query "-command=path2gc ${OBJECT_ID}"
+    ;;
+  compare_heap_dumps)
+    BASELINE="${1:?baseline dump path is required}"
+    [ -f "$BASELINE" ] || { echo "Baseline heap dump not found: $BASELINE" >&2; exit 66; }
+    run_mat "$INPUT" "-snapshot2=${BASELINE}" -format=txt -unzip org.eclipse.mat.api:compare
+    run_mat "$INPUT" "-baseline=${BASELINE}" -format=txt -unzip org.eclipse.mat.api:suspects2
+    ;;
+  *) echo "Unsupported fixed MAT operation: $OPERATION" >&2; exit 64 ;;
+esac
+
+# Middleware Atlas: emit text reports and keep report outputs outside input/.
+# MAT's index files stay beside the staged dump for reuse; only files/directories
+# matching the input's report-name prefix are moved to the reports directory.
+INPUT_DIR="$(dirname "$INPUT")"
+INPUT_BASE="$(basename "$INPUT")"
+INPUT_BASE="${INPUT_BASE%.*}"
+REPORT_DIR="/work/reports"
+mkdir -p "$REPORT_DIR"
+for REPORT_OUTPUT in "$INPUT_DIR/${INPUT_BASE}_"*; do
+  [ -e "$REPORT_OUTPUT" ] || continue
+  mv -- "$REPORT_OUTPUT" "$REPORT_DIR/"
+done

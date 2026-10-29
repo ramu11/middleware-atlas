@@ -6,3 +6,33 @@
 *.bak*
 .env
 .env.local
+
+# Local environment and secrets
+.env.*
+.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+# Rust build artifacts
+# Node.js and Next.js artifacts
+node_modules/
+apps/web/.next/
+apps/web/out/
+apps/web/coverage/
+apps/web/.turbo/
+# Test and coverage output
+coverage/
+*.profraw
+# Logs and temporary files
+*.log
+*.tmp
+*.swp
+*.swo
+*~
+*.rs.bak
+# Local editor and operating-system files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

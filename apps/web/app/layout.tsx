@@ -2,12 +2,11 @@ import type { Metadata } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "Middleware Atlas — Support Engineering Workspace",
+  title: "Middleware Atlas — Diagnostic Agent",
   description:
-    "Investigate middleware incidents with structured evidence and diagnostic tools.",
+    "Describe a middleware incident, attach diagnostic evidence, and get a local-first investigation.",
 };
 
-import { PersistenceDock } from "@/components/persistence-dock";
 
 export default function RootLayout({
   children,
@@ -15,7 +14,7 @@ export default function RootLayout({
   return (
     <html lang="en">
       <body>{children}
-        <PersistenceDock /></body>
+</body>
     </html>
   );
 }

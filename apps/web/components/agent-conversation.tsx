@@ -1,41 +1,105 @@
 "use client";
 
-import { useState, type FormEvent, type KeyboardEvent } from "react";
-import { ArrowUpRight, Bot, MessageSquareText, Sparkles } from "lucide-react";
+import { useEffect, useState, type FormEvent, type KeyboardEvent } from "react";
+import { ArrowUpRight, Bot, FileSearch, MessageSquareText, Plus, Sparkles, UserRound } from "lucide-react";
+import { getCase, listAgentMessages, sendAgentChat, type AgentMessage, type DiagnosticPreparationResponse } from "@/lib/atlas-api";
 
-type PromptDraft = {
-  id: string;
-  content: string;
+type AgentConversationProps = {
+  onPrepare: (problemDescription: string) => Promise<DiagnosticPreparationResponse>;
+  hasStagedFiles: boolean;
+  onNewInvestigation: () => void;
 };
 
+type LocalRun = { id: string; description: string; result: DiagnosticPreparationResponse };
+
+const ACTIVE_CASE_KEY = "atlas.agent.activeCaseId";
+const SESSION_CASE_KEY = "atlas.agentSessionCaseId";
 const QUICK_PROMPTS = [
-  "Summarize the evidence collected so far",
-  "Help me investigate Kafka replication lag",
-  "What should I inspect in a Java thread dump?",
+  "Summarize the heap dump findings and likely causes",
+  "Explain the Leak Suspects report in plain language",
+  "Which classes or objects retain the most memory?",
+  "Show the most important dominators and what they mean",
+  "What paths to GC roots should I investigate next?",
+  "Compare the current findings with a baseline heap dump",
+  "Analyze the thread states and check for possible deadlocks",
+  "What additional evidence or version details do you need from me?",
 ];
 
-function newDraftId(): string {
-  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
-    return crypto.randomUUID();
-  }
-  return `prompt-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+function newLocalId(): string {
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") return crypto.randomUUID();
+  return `run-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 }
 
-export function AgentConversation() {
+export function AgentConversation({ onPrepare, hasStagedFiles, onNewInvestigation }: AgentConversationProps) {
   const [draft, setDraft] = useState("");
-  const [queuedPrompts, setQueuedPrompts] = useState<PromptDraft[]>([]);
+  const [caseId, setCaseId] = useState<string | null>(null);
+  const [incidentRef, setIncidentRef] = useState("");
+  const [messages, setMessages] = useState<AgentMessage[]>([]);
+  const [runs, setRuns] = useState<LocalRun[]>([]);
   const [status, setStatus] = useState("");
+  const [error, setError] = useState("");
+  const [working, setWorking] = useState(false);
+  const [restoring, setRestoring] = useState(true);
 
-  function queuePrompt(event: FormEvent<HTMLFormElement>) {
+  useEffect(() => {
+    let cancelled = false;
+    const restore = async () => {
+      try {
+        const storedId = window.localStorage.getItem(ACTIVE_CASE_KEY) || window.sessionStorage.getItem(SESSION_CASE_KEY);
+        if (!storedId) return;
+        const [record, history] = await Promise.all([getCase(storedId), listAgentMessages(storedId)]);
+        if (cancelled) return;
+        window.sessionStorage.setItem(SESSION_CASE_KEY, storedId);
+        setCaseId(storedId);
+        setIncidentRef(record.display_id);
+        setMessages(history);
+      } catch (cause) {
+        if (!cancelled) setError(cause instanceof Error ? cause.message : "Could not restore the previous agent conversation.");
+      } finally {
+        if (!cancelled) setRestoring(false);
+      }
+    };
+    void Promise.resolve().then(restore);
+    return () => { cancelled = true; };
+  }, []);
+
+  async function submitMessage(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const content = draft.trim();
-    if (!content) return;
-
-    setQueuedPrompts((current) => [...current, { id: newDraftId(), content }]);
-    setDraft("");
-    setStatus(
-      "Prompt added to this page session only. The agent conversation API is not connected yet, so nothing was sent to a model.",
-    );
+    if (!content || working || restoring) return;
+    setWorking(true);
+    setStatus("");
+    setError("");
+    let currentCaseId = caseId || window.localStorage.getItem(ACTIVE_CASE_KEY) || window.sessionStorage.getItem(SESSION_CASE_KEY);
+    try {
+      // Initial intake or new uploads: persist evidence and run only the matching local plugin.
+      if (!currentCaseId || hasStagedFiles) {
+        const result = await onPrepare(content);
+        currentCaseId = result.case_id;
+        setCaseId(currentCaseId);
+        window.localStorage.setItem(ACTIVE_CASE_KEY, currentCaseId);
+        window.sessionStorage.setItem(SESSION_CASE_KEY, currentCaseId);
+        const record = await getCase(currentCaseId);
+        setIncidentRef(record.display_id);
+        setRuns((existing) => [{ id: newLocalId(), description: content, result }, ...existing].slice(0, 8));
+      }
+      if (!currentCaseId) throw new Error("Atlas did not create an internal incident workspace.");
+      setStatus("Sending the problem and bounded local evidence to local Ollama…");
+      const response = await sendAgentChat(currentCaseId, content);
+      setIncidentRef(response.incident_ref);
+      setMessages(response.messages);
+      setDraft("");
+      setStatus(response.needs_more_info
+        ? "The agent needs more information. Reply below to continue this investigation."
+        : response.evidence_attached
+          ? "Analysis updated using the latest local evidence. Ask a follow-up to continue the same conversation."
+          : "Response received. Follow-up messages continue the same conversation.");
+    } catch (cause) {
+      setDraft(content);
+      setError(cause instanceof Error ? cause.message : "The diagnostic agent could not complete this request.");
+    } finally {
+      setWorking(false);
+    }
   }
 
   function handleComposerKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
@@ -45,66 +109,87 @@ export function AgentConversation() {
     }
   }
 
+  function startNewInvestigation() {
+    window.localStorage.removeItem(ACTIVE_CASE_KEY);
+    window.sessionStorage.removeItem(SESSION_CASE_KEY);
+    setCaseId(null);
+    setIncidentRef("");
+    setMessages([]);
+    setRuns([]);
+    setDraft("");
+    setStatus("New investigation ready. Describe the problem and attach diagnostic evidence.");
+    setError("");
+    onNewInvestigation();
+  }
+
   return (
-    <section
-      className="agent-conversation"
-      aria-labelledby="agent-conversation-title"
-      data-agent-conversation-preview
-    >
+    <section className="agent-conversation" aria-labelledby="agent-conversation-title" data-agent-conversation>
       <header className="agent-conversation-header">
         <div className="agent-conversation-icon"><MessageSquareText size={19} /></div>
         <div className="agent-conversation-heading">
           <div className="agent-conversation-title-row">
-            <h2 id="agent-conversation-title">Agent conversation</h2>
-            <span className="agent-preview-badge"><Sparkles size={12} /> UI preview</span>
+            <h2 id="agent-conversation-title">Middleware Atlas agent</h2>
+            <span className="agent-preview-badge"><Sparkles size={12} /> Evidence-led chat</span>
           </div>
-          <p>Ask questions about your incident and the diagnostic evidence.</p>
+          <p>Describe the incident, attach dumps, and continue asking questions in one remembered conversation.</p>
+          {incidentRef && <p className="agent-incident-ref">Investigation reference: <strong>{incidentRef}</strong></p>}
         </div>
+        <button className="agent-new-investigation" type="button" onClick={startNewInvestigation} disabled={working} title="Start a new internal investigation">
+          <Plus size={14} /> New investigation
+        </button>
       </header>
 
       <div className="agent-connection-notice" role="note">
         <div className="agent-connection-icon"><Bot size={18} /></div>
         <div>
-          <strong>Agent endpoint not connected yet</strong>
-          <p>
-            The conversation composer is ready for integration. For now, prompts stay in this page session and are not sent to Dify or a model.
-          </p>
+          <strong>Local diagnostics with persistent agent conversation</strong>
+          <p>Heap and thread dumps are analyzed locally first. Atlas uses a loopback-only Ollama model and sends only bounded text/CSV evidence to that local model; raw heap dumps and MAT indexes remain on this machine.</p>
         </div>
       </div>
 
       <div className="agent-quick-prompts">
-        <span className="agent-section-label">START WITH A QUESTION</span>
+        <span className="agent-section-label">SUGGESTED QUESTIONS · 8 OPTIONS</span>
         <div className="agent-prompt-chips">
           {QUICK_PROMPTS.map((prompt) => (
-            <button
-              className="agent-prompt-chip"
-              key={prompt}
-              type="button"
-              onClick={() => {
-                setDraft(prompt);
-                setStatus("");
-              }}
-            >
+            <button className="agent-prompt-chip" key={prompt} type="button" disabled={working || restoring} onClick={() => { setDraft(prompt); setStatus(""); setError(""); }}>
               {prompt}
             </button>
           ))}
         </div>
       </div>
 
-      {queuedPrompts.length > 0 && (
-        <div className="agent-queued-prompts" aria-label="Local prompt drafts">
-          <div className="agent-section-label">LOCAL DRAFTS · NOT SENT</div>
-          {queuedPrompts.map((prompt) => (
-            <article className="agent-draft-message" key={prompt.id}>
-              <div className="agent-draft-label">You · draft</div>
-              <p>{prompt.content}</p>
+      {(runs.length > 0 || messages.length > 0) && (
+        <div className="agent-chat-history" aria-label="Investigation conversation history">
+          <div className="agent-section-label">CONVERSATION HISTORY</div>
+          {runs.map((run) => (
+            <article className="agent-run-summary" key={run.id}>
+              <div className="agent-run-summary-heading"><FileSearch size={14} /><strong>Local diagnostic run</strong><span>{run.result.status}</span></div>
+              <p>{run.description}</p>
+              {run.result.preparations.map((prepared) => (
+                <div className="agent-run-plugin" key={prepared.tool_run_id}>
+                  <div><strong>{prepared.tool_id}</strong> · {prepared.status}</div>
+                  <p>{prepared.artifact_filename}: {prepared.summary}</p>
+                  {prepared.warnings.map((warning) => <p className="agent-preparation-warning" key={warning}>{warning}</p>)}
+                  <p className="agent-local-output-note">Files saved in the local investigation workspace.</p>
+                </div>
+              ))}
+            </article>
+          ))}
+          {messages.map((message) => (
+            <article className={`agent-chat-message ${message.role === "assistant" ? "agent-chat-assistant" : "agent-chat-user"}`} key={message.id}>
+              <div className="agent-chat-message-heading">
+                {message.role === "assistant" ? <Bot size={14} /> : <UserRound size={14} />}
+                <strong>{message.role === "assistant" ? "Atlas" : "You"}</strong>
+                <time dateTime={message.created_at}>{new Date(message.created_at).toLocaleString()}</time>
+              </div>
+              <p>{message.content}</p>
             </article>
           ))}
         </div>
       )}
 
-      <form className="agent-composer" onSubmit={queuePrompt}>
-        <label className="agent-composer-label" htmlFor="atlas-agent-prompt">Your message</label>
+      <form className="agent-composer" onSubmit={submitMessage}>
+        <label className="agent-composer-label" htmlFor="atlas-agent-prompt">Problem description or follow-up question</label>
         <textarea
           id="atlas-agent-prompt"
           name="message"
@@ -113,16 +198,19 @@ export function AgentConversation() {
           onKeyDown={handleComposerKeyDown}
           rows={4}
           maxLength={12000}
-          placeholder="Ask about broker errors, replication lag, thread contention, heap usage…"
+          disabled={working || restoring}
+          placeholder="Describe the symptoms, ask what the MAT report means, or answer the agent's follow-up question…"
         />
         <div className="agent-composer-footer">
-          <span>Ctrl/⌘ + Enter for a new local draft · {draft.length}/12,000</span>
-          <button className="button button-primary agent-queue-button" type="submit" disabled={!draft.trim()}>
-            Queue prompt <ArrowUpRight size={15} />
+          <span>Ctrl/⌘ + Enter to send · {draft.length}/12,000 {restoring ? "· restoring conversation…" : hasStagedFiles ? "· new files will be analyzed" : "· conversation history is saved locally"}</span>
+          <button className="button button-primary agent-queue-button" type="submit" disabled={!draft.trim() || working || restoring}>
+            {working ? "Working…" : "Send to Atlas"} {!working && <ArrowUpRight size={15} />}
           </button>
         </div>
       </form>
       {status && <p className="agent-composer-status" role="status" aria-live="polite">{status}</p>}
+      {error && <p className="agent-composer-error" role="alert">{error}</p>}
+      <p className="agent-session-note">Conversation messages are stored with the internal incident on this machine. Atlas stores conversation turns locally; you never need to enter an internal case ID.</p>
     </section>
   );
 }
