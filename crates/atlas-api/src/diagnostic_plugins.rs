@@ -5,15 +5,21 @@
 //! report context for the separate agent-chat request; they do not call the model directly.
 use serde::Serialize;
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use std::io::Read;
 use std::{
     collections::{BTreeMap, HashMap},
     path::{Path, PathBuf},
     process::Stdio,
-    sync::{Arc, Mutex, OnceLock},
+    sync::{Arc, Mutex, OnceLock, Weak},
     time::Duration,
 };
-use tokio::{fs, process::Command, time::timeout};
+use tokio::{
+    fs,
+    io::{AsyncReadExt, AsyncSeekExt, SeekFrom},
+    process::Command,
+    time::timeout,
+};
 
 const MAX_THREAD_DUMP_BYTES: u64 = 64 * 1024 * 1024;
 
@@ -32,6 +38,9 @@ pub struct PreparedPlugin {
     pub status: String,
     pub artifact_id: String,
     pub artifact_filename: String,
+    pub artifact_sha256: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub job_id: Option<String>,
     pub summary: String,
     pub workspace_relative_path: String,
     pub files: Vec<PreparedFile>,
@@ -226,8 +235,13 @@ pub async fn prepare(
         let bytes = fs::read(&source).await.map_err(|error| {
             format!("Could not read the thread dump for local parsing: {error}")
         })?;
-        let text = String::from_utf8_lossy(&bytes).into_owned();
-        let parsed = summarize_thread_dump(&text, bytes.len() as u64);
+        let bytes_analyzed = bytes.len() as u64;
+        let parsed = tokio::task::spawn_blocking(move || {
+            let text = String::from_utf8_lossy(&bytes).into_owned();
+            summarize_thread_dump(&text, bytes_analyzed)
+        })
+        .await
+        .map_err(|error| format!("Thread-dump parsing worker failed: {error}"))?;
         let summary_json = serde_json::to_value(&parsed)
             .map_err(|error| format!("Could not serialize thread dump summary: {error}"))?;
         write_json(
@@ -296,6 +310,8 @@ pub async fn prepare(
         status: "prepared".to_owned(),
         artifact_id: artifact_id.to_owned(),
         artifact_filename: artifact_filename.to_owned(),
+        artifact_sha256: artifact_sha256.to_owned(),
+        job_id: None,
         summary,
         workspace_relative_path,
         files,
@@ -562,6 +578,7 @@ pub async fn execute_heap_operation(
         return Err("Prepared MAT input must be a regular non-symlink file.".to_owned());
     }
 
+    let cancel_marker = workspace.join(format!(".cancel-requested-{}", prepared.tool_run_id));
     let baseline_container_path = if let Some(baseline) = baseline.as_ref() {
         let ext = Path::new(&baseline.filename)
             .extension()
@@ -633,6 +650,9 @@ pub async fn execute_heap_operation(
     };
 
     let image = ensure_mat_image(&runtime).await?;
+    if fs::metadata(&cancel_marker).await.is_ok() {
+        return Err("MAT job cancellation was requested before container execution; no analysis container was started.".to_owned());
+    }
     // MAT creates index files beside its input. The staged files are hard links for
     // efficient preparation, so replace them with independent copies before mounting
     // the workspace writable; this prevents MAT/parser code from modifying the saved
@@ -650,6 +670,7 @@ pub async fn execute_heap_operation(
         &input_path,
         &copy_marker,
         &prepared.tool_run_id,
+        &prepared.artifact_sha256,
     )
     .await?;
     if let Some(baseline) = baseline.as_ref() {
@@ -673,8 +694,15 @@ pub async fn execute_heap_operation(
             &baseline_staged,
             &baseline_marker,
             &prepared.tool_run_id,
+            &baseline.sha256,
         )
         .await?;
+    }
+    if fs::metadata(&cancel_marker).await.is_ok() {
+        return Err(
+            "MAT job cancellation was requested during staging; no analysis container was started."
+                .to_owned(),
+        );
     }
     let container_name = format!("atlas-mat-{}", prepared.tool_run_id.replace('-', ""));
     let log_path = workspace.join("mat-container.log");
@@ -881,13 +909,37 @@ pub async fn execute_heap_operation(
     Ok(true)
 }
 
-/// Convert a staged hard link into an independent local copy once. MAT writes index
-/// files beside its input; an independent copy ensures it cannot mutate `data/artifacts`.
+/// Stream a file through SHA-256 without loading a heap dump into memory.
+async fn sha256_file(path: &Path) -> Result<String, String> {
+    let mut file = fs::File::open(path)
+        .await
+        .map_err(|error| format!("Could not open file for SHA-256 verification: {error}"))?;
+    let mut hasher = Sha256::new();
+    let mut buffer = vec![0u8; 1024 * 1024];
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .await
+            .map_err(|error| format!("Could not stream file for SHA-256 verification: {error}"))?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(hasher
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect())
+}
+
+/// Verify both saved and staged bytes; markers alone are never accepted as proof.
 async fn ensure_independent_copy(
     source: &Path,
     staged: &Path,
     marker: &Path,
     run_id: &str,
+    expected_sha256: &str,
 ) -> Result<(), String> {
     let source_meta = fs::symlink_metadata(source)
         .await
@@ -904,8 +956,29 @@ async fn ensure_independent_copy(
     if staged_meta.len() != source_meta.len() {
         return Err("Staged heap input size differs from the saved artifact.".to_owned());
     }
-    if fs::metadata(marker).await.is_ok() {
-        return Ok(());
+    let normalized_expected = expected_sha256.trim().to_ascii_lowercase();
+    if normalized_expected.len() != 64
+        || !normalized_expected.chars().all(|c| c.is_ascii_hexdigit())
+    {
+        return Err(
+            "Saved artifact SHA-256 is missing or invalid; refusing to stage unverified bytes."
+                .to_owned(),
+        );
+    }
+    let source_hash = sha256_file(source).await?;
+    if source_hash != normalized_expected {
+        return Err("Saved artifact bytes no longer match the SHA-256 recorded at upload; refusing MAT execution.".to_owned());
+    }
+    let marker_text = fs::read_to_string(marker).await.unwrap_or_default();
+    if staged_meta.len() == source_meta.len()
+        && marker_text
+            .lines()
+            .any(|line| line == format!("sha256={normalized_expected}"))
+    {
+        let staged_hash = sha256_file(staged).await?;
+        if staged_hash == normalized_expected {
+            return Ok(());
+        }
     }
     let temp = staged.with_file_name(format!(".mat-copy-{run_id}.part"));
     let copied = match fs::copy(source, &temp).await {
@@ -924,6 +997,14 @@ async fn ensure_independent_copy(
             "The isolated MAT input copy has a different size than the saved artifact.".to_owned(),
         );
     }
+    let copied_hash = sha256_file(&temp).await?;
+    if copied_hash != normalized_expected {
+        let _ = fs::remove_file(&temp).await;
+        return Err(
+            "Isolated MAT copy SHA-256 does not match the saved artifact; refusing analysis."
+                .to_owned(),
+        );
+    }
     if let Err(error) = set_private_file(&temp) {
         let _ = fs::remove_file(&temp).await;
         return Err(format!("Could not secure isolated MAT input copy: {error}"));
@@ -940,7 +1021,11 @@ async fn ensure_independent_copy(
             "Could not activate isolated MAT input copy: {error}"
         ));
     }
-    let note = format!("schema_version=1\nsize_bytes={}\n", source_meta.len());
+    let note = format!(
+        "schema_version=1\nsize_bytes={}\nsha256={}\n",
+        source_meta.len(),
+        normalized_expected
+    );
     fs::write(marker, note)
         .await
         .map_err(|error| format!("Could not write MAT input copy marker: {error}"))?;
@@ -949,7 +1034,7 @@ async fn ensure_independent_copy(
     Ok(())
 }
 
-fn validate_object_id(input: &str) -> Result<String, String> {
+pub(crate) fn validate_object_id(input: &str) -> Result<String, String> {
     let trimmed = input.trim();
     let hex = trimmed
         .strip_prefix("0x")
@@ -1105,9 +1190,24 @@ async fn ensure_mat_image(runtime: &str) -> Result<String, String> {
 }
 
 async fn read_file_tail(path: &Path, max_bytes: usize) -> Result<String, String> {
-    let bytes = fs::read(path).await.map_err(|error| error.to_string())?;
-    let start = bytes.len().saturating_sub(max_bytes);
-    Ok(String::from_utf8_lossy(&bytes[start..]).into_owned())
+    let mut file = fs::File::open(path)
+        .await
+        .map_err(|error| error.to_string())?;
+    let length = file
+        .metadata()
+        .await
+        .map_err(|error| error.to_string())?
+        .len();
+    let start = length.saturating_sub(max_bytes as u64);
+    file.seek(SeekFrom::Start(start))
+        .await
+        .map_err(|error| error.to_string())?;
+    let mut bytes = Vec::with_capacity(max_bytes.min(length as usize));
+    file.take(max_bytes as u64)
+        .read_to_end(&mut bytes)
+        .await
+        .map_err(|error| error.to_string())?;
+    Ok(String::from_utf8_lossy(&bytes).into_owned())
 }
 
 async fn collect_report_paths(
@@ -1221,6 +1321,54 @@ async fn filter_histogram_reports(
     Ok(matches.len())
 }
 
+fn read_zip_report_excerpts(path: &Path) -> Result<Vec<(String, String)>, String> {
+    let file = std::fs::File::open(path)
+        .map_err(|error| format!("Could not open MAT report archive: {error}"))?;
+    let mut archive = zip::ZipArchive::new(file)
+        .map_err(|error| format!("Could not inspect MAT report archive: {error}"))?;
+    let mut output = Vec::new();
+    for index in 0..archive.len().min(128) {
+        if output.len() >= 20 {
+            break;
+        }
+        let mut entry = archive
+            .by_index(index)
+            .map_err(|error| format!("Could not read MAT report archive entry: {error}"))?;
+        if entry.is_dir() {
+            continue;
+        }
+        let name = entry.name().to_owned();
+        let extension = Path::new(&name)
+            .extension()
+            .and_then(|v| v.to_str())
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        if !matches!(extension.as_str(), "txt" | "csv" | "html" | "htm") {
+            continue;
+        }
+        let mut bytes = Vec::with_capacity(12 * 1024);
+        std::io::Read::by_ref(&mut entry)
+            .take(12 * 1024)
+            .read_to_end(&mut bytes)
+            .map_err(|error| format!("Could not read bounded report excerpt from ZIP: {error}"))?;
+        let raw = String::from_utf8_lossy(&bytes);
+        let excerpt = if matches!(extension.as_str(), "html" | "htm") {
+            clean_html_excerpt(&raw)
+        } else {
+            raw.to_string()
+        };
+        if !excerpt.trim().is_empty() {
+            let safe_name = name
+                .chars()
+                .filter(|c| !c.is_control())
+                .take(180)
+                .collect::<String>();
+            output.push((safe_name, excerpt));
+        }
+    }
+    Ok(output)
+}
+
 async fn create_llm_context(
     workspace: &Path,
     artifact_filename: &str,
@@ -1258,10 +1406,16 @@ async fn create_llm_context(
             .unwrap_or("")
             .to_ascii_lowercase();
         if matches!(extension.as_str(), "txt" | "csv") {
-            let bytes = fs::read(path)
+            let report_file = fs::File::open(path)
                 .await
-                .map_err(|error| format!("Could not read MAT text report: {error}"))?;
-            let text = String::from_utf8_lossy(&bytes[..bytes.len().min(50 * 1024)]);
+                .map_err(|error| format!("Could not open MAT text report: {error}"))?;
+            let mut bytes = Vec::with_capacity(50 * 1024);
+            report_file
+                .take(50 * 1024)
+                .read_to_end(&mut bytes)
+                .await
+                .map_err(|error| format!("Could not read bounded MAT text report: {error}"))?;
+            let text = String::from_utf8_lossy(&bytes);
             let mut excerpt = text.to_string();
             if operation == "get_histogram"
                 && let Some(filter) = class_filter.filter(|value| !value.trim().is_empty())
@@ -1295,45 +1449,13 @@ async fn create_llm_context(
                 included += 1;
             }
         } else if extension == "zip" {
-            let file = std::fs::File::open(path)
-                .map_err(|error| format!("Could not open MAT report archive: {error}"))?;
-            let mut archive = zip::ZipArchive::new(file)
-                .map_err(|error| format!("Could not inspect MAT report archive: {error}"))?;
-            let entries = archive.len().min(128);
-            for entry_index in 0..entries {
+            let zip_path = path.to_path_buf();
+            let excerpts = tokio::task::spawn_blocking(move || read_zip_report_excerpts(&zip_path))
+                .await
+                .map_err(|error| format!("MAT ZIP extraction worker failed: {error}"))??;
+            for (label, excerpt) in excerpts {
                 if output.len() >= MAX_MAT_CONTEXT_BYTES || included >= 20 {
                     break;
-                }
-                let mut entry = archive
-                    .by_index(entry_index)
-                    .map_err(|error| format!("Could not read MAT report archive entry: {error}"))?;
-                if entry.is_dir() {
-                    continue;
-                }
-                let entry_name = entry.name().to_owned();
-                let entry_extension = Path::new(&entry_name)
-                    .extension()
-                    .and_then(|value| value.to_str())
-                    .unwrap_or("")
-                    .to_ascii_lowercase();
-                if !matches!(entry_extension.as_str(), "txt" | "csv" | "html" | "htm") {
-                    continue;
-                }
-                let mut bytes = Vec::with_capacity(12 * 1024);
-                std::io::Read::by_ref(&mut entry)
-                    .take(12 * 1024)
-                    .read_to_end(&mut bytes)
-                    .map_err(|error| {
-                        format!("Could not read bounded report excerpt from ZIP: {error}")
-                    })?;
-                let raw = String::from_utf8_lossy(&bytes);
-                let excerpt = if matches!(entry_extension.as_str(), "html" | "htm") {
-                    clean_html_excerpt(&raw)
-                } else {
-                    raw.to_string()
-                };
-                if excerpt.trim().is_empty() {
-                    continue;
                 }
                 let available = MAX_MAT_CONTEXT_BYTES.saturating_sub(output.len());
                 if available <= 128 {
@@ -1343,15 +1465,10 @@ async fn create_llm_context(
                     .chars()
                     .take(available.saturating_sub(128))
                     .collect::<String>();
-                let label = entry_name
-                    .chars()
-                    .filter(|character| !character.is_control())
-                    .take(180)
-                    .collect::<String>();
                 output.push_str(&format!(
                     "\n\n### MAT archive excerpt: {}!{}\n\n{}",
                     path.file_name()
-                        .and_then(|value| value.to_str())
+                        .and_then(|v| v.to_str())
                         .unwrap_or("report.zip"),
                     label,
                     bounded
@@ -1428,6 +1545,7 @@ async fn write_mat_execution_manifest(
         "execution_status": execution_status,
         "artifact_id": &prepared.artifact_id,
         "artifact_filename": &prepared.artifact_filename,
+        "artifact_sha256": &prepared.artifact_sha256,
         "mat_image": std::env::var("ATLAS_MAT_IMAGE").unwrap_or_else(|_| "middleware-atlas/mat:1.17.0".to_owned()),
         "reports": report_paths,
         "llm_context_file": context_file,
@@ -1519,17 +1637,34 @@ pub async fn record_mat_failure(
 
 /// Serializes operations for the same saved heap artifact so cached MAT indexes cannot race.
 pub fn heap_artifact_lock(case_id: &str, artifact_id: &str) -> Arc<tokio::sync::Mutex<()>> {
-    static LOCKS: OnceLock<Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>> = OnceLock::new();
+    static LOCKS: OnceLock<Mutex<HashMap<String, Weak<tokio::sync::Mutex<()>>>>> = OnceLock::new();
     let key = format!("{case_id}:{artifact_id}");
     let locks = LOCKS.get_or_init(|| Mutex::new(HashMap::new()));
     let mut guard = locks
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    Arc::clone(
-        guard
-            .entry(key)
-            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(()))),
-    )
+    guard.retain(|_, weak| weak.strong_count() > 0);
+    if let Some(existing) = guard.get(&key).and_then(Weak::upgrade) {
+        return existing;
+    }
+    let lock = Arc::new(tokio::sync::Mutex::new(()));
+    guard.insert(key, Arc::downgrade(&lock));
+    lock
+}
+
+/// Request termination of the MAT container corresponding to a persisted job UUID.
+/// This is best-effort: the job row remains authoritative and the worker finalizes its state.
+pub async fn cancel_mat_job(job_id: &str) {
+    let container_name = format!("atlas-mat-{}", job_id.replace('-', ""));
+    if let Ok(Some(runtime)) = detect_container_runtime().await {
+        let _ = timeout(
+            Duration::from_secs(10),
+            Command::new(runtime)
+                .args(["rm", "--force", &container_name])
+                .output(),
+        )
+        .await;
+    }
 }
 
 fn mat_job_semaphore() -> Arc<tokio::sync::Semaphore> {

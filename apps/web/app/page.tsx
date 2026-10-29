@@ -25,7 +25,7 @@ import {
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent, type DragEvent } from "react";
 import { sha256Blob } from "@/lib/sha256-stream";
-import { createCase, deleteCase, listArtifacts, listCases, prepareDiagnostics, uploadArtifact, type AtlasArtifact, type AtlasCase } from "@/lib/atlas-api";
+import { cancelDiagnosticJob, createCase, deleteCase, listArtifacts, listCases, prepareDiagnostics, uploadArtifact, type AtlasArtifact, type AtlasCase, type DiagnosticJobStatus } from "@/lib/atlas-api";
 import { AgentConversation } from "@/components/agent-conversation";
 
 type ArtifactKind =
@@ -133,6 +133,36 @@ export default function Home() {
   const [savedCasesError, setSavedCasesError] = useState("");
   const [selectedCaseId, setSelectedCaseId] = useState<string | null>(null);
   const [deletingCaseId, setDeletingCaseId] = useState<string | null>(null);
+  const [activeDiagnosticJob, setActiveDiagnosticJob] = useState<DiagnosticJobStatus | null>(null);
+  const [cancellingDiagnosticJob, setCancellingDiagnosticJob] = useState(false);
+
+  useEffect(() => {
+    const onJobUpdate = (event: Event) => {
+      const job = (event as CustomEvent<DiagnosticJobStatus>).detail;
+      if (!job?.id) return;
+      if (["succeeded", "failed", "cancelled"].includes(job.status)) {
+        setActiveDiagnosticJob(null);
+        setCancellingDiagnosticJob(false);
+      } else {
+        setActiveDiagnosticJob(job);
+      }
+    };
+    window.addEventListener("atlas:diagnostic-job-update", onJobUpdate);
+    return () => window.removeEventListener("atlas:diagnostic-job-update", onJobUpdate);
+  }, []);
+
+  const requestCancelDiagnosticJob = async () => {
+    if (!activeDiagnosticJob || cancellingDiagnosticJob) return;
+    setCancellingDiagnosticJob(true);
+    try {
+      const job = await cancelDiagnosticJob(activeDiagnosticJob.id);
+      setActiveDiagnosticJob(job);
+      setPersistenceMessage(job.status === "cancelled" ? "Diagnostic job cancelled." : "Cancellation requested; stopping the MAT container…");
+    } catch (error) {
+      setPersistenceMessage(error instanceof Error ? error.message : "Could not cancel the diagnostic job.");
+      setCancellingDiagnosticJob(false);
+    }
+  };
 
   const refreshSavedCases = useCallback(async () => {
     setSavedCasesLoading(true);
@@ -753,6 +783,13 @@ return (
       {persistenceMessage && (
         <div role="status" aria-live="polite" style={{ position: "fixed", left: "50%", bottom: 24, transform: "translateX(-50%)", zIndex: 9999, maxWidth: "min(640px, calc(100vw - 32px))", padding: "12px 16px", borderRadius: 12, background: "#202838", color: "white", boxShadow: "0 10px 36px rgba(20,29,48,.22)", fontSize: 13, lineHeight: 1.45 }}>
           {persistenceBusy ? "Saving locally… " : ""}{persistenceMessage}
+          {activeDiagnosticJob && <div style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 8 }}>
+            <span>{activeDiagnosticJob.stage}</span>
+            <button type="button" onClick={() => void requestCancelDiagnosticJob()} disabled={cancellingDiagnosticJob || activeDiagnosticJob.cancel_requested}
+              style={{ border: "1px solid rgba(255,255,255,.45)", borderRadius: 8, padding: "4px 8px", background: "transparent", color: "white", cursor: "pointer" }}>
+              {cancellingDiagnosticJob || activeDiagnosticJob.cancel_requested ? "Cancelling…" : "Cancel analysis"}
+            </button>
+          </div>}
         </div>
       )}
           </div>

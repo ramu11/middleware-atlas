@@ -145,6 +145,8 @@ export type PreparedDiagnosticFile = {
 
 export type PreparedDiagnosticPlugin = {
   tool_run_id: string;
+  job_id?: string | null;
+  artifact_sha256?: string;
   tool_id: string;
   tool_version: string;
   status: string;
@@ -164,6 +166,57 @@ export type DiagnosticPreparationResponse = {
   preparations: PreparedDiagnosticPlugin[];
 };
 
+export type DiagnosticJobStatus = {
+  id: string;
+  case_id: string;
+  operation: string;
+  status: "queued" | "running" | "succeeded" | "failed" | "cancelled";
+  progress: number; // Phase checkpoint from the worker/container, not time remaining.
+  stage: string;
+  cancel_requested: boolean;
+  error?: string | null;
+  result?: DiagnosticPreparationResponse | null;
+  created_at: string;
+  updated_at: string;
+  started_at?: string | null;
+  finished_at?: string | null;
+};
+
+function emitDiagnosticJob(job: DiagnosticJobStatus): void {
+  if (typeof window !== "undefined") {
+    window.dispatchEvent(new CustomEvent("atlas:diagnostic-job-update", { detail: job }));
+  }
+}
+
+export async function getDiagnosticJob(jobId: string): Promise<DiagnosticJobStatus> {
+  return request<DiagnosticJobStatus>(`/api/v1/diagnostic-jobs/${encodeURIComponent(jobId)}`);
+}
+
+export async function cancelDiagnosticJob(jobId: string): Promise<DiagnosticJobStatus> {
+  const job = await request<DiagnosticJobStatus>(`/api/v1/diagnostic-jobs/${encodeURIComponent(jobId)}/cancel`, { method: "POST" });
+  emitDiagnosticJob(job);
+  return job;
+}
+
+async function waitForDiagnosticJob(jobId: string): Promise<DiagnosticPreparationResponse> {
+  const deadline = Date.now() + 24 * 60 * 60 * 1000;
+  for (;;) {
+    if (Date.now() >= deadline) throw new Error(`Diagnostic job ${jobId} is still running after 24 hours. Its durable status remains available from the job endpoint.`);
+    const job = await getDiagnosticJob(jobId);
+    emitDiagnosticJob(job);
+    if (job.status === "failed") {
+      if (job.result) return job.result;
+      throw new Error(job.error || `Diagnostic job ${job.id} failed. Inspect the MAT job result and local container log.`);
+    }
+    if (job.status === "cancelled") throw new Error(`Diagnostic job ${job.id} was cancelled.`);
+    if (job.status === "succeeded") {
+      if (!job.result) throw new Error(`Diagnostic job ${job.id} finished without a result payload.`);
+      return job.result;
+    }
+    await new Promise<void>((resolve) => window.setTimeout(resolve, 900));
+  }
+}
+
 export function prepareDiagnostics(
   caseId: string,
   problemDescription: string,
@@ -175,7 +228,28 @@ export function prepareDiagnostics(
       method: "POST",
       body: JSON.stringify({ problem_description: problemDescription, artifact_ids: artifactIds }),
     },
-  );
+  ).then(async (initial) => {
+    let merged = initial;
+    for (const queued of initial.preparations.filter((item) => item.job_id)) {
+      emitDiagnosticJob({
+        id: queued.job_id!, case_id: initial.case_id, operation: "analyze_heap_dump",
+        status: "queued", progress: 0, stage: "Queued for MAT analysis", cancel_requested: false,
+        created_at: new Date().toISOString(), updated_at: new Date().toISOString(),
+      });
+      const completed = await waitForDiagnosticJob(queued.job_id!);
+      const finalPlugin = completed.preparations.find((item) => item.job_id === queued.job_id)
+        ?? completed.preparations[0];
+      if (finalPlugin) {
+        merged = {
+          ...merged,
+          status: finalPlugin.status,
+          message: completed.message,
+          preparations: merged.preparations.map((item) => item.job_id === queued.job_id ? finalPlugin : item),
+        };
+      }
+    }
+    return merged;
+  });
 }
 
 export type HeapOperationName =
@@ -201,10 +275,13 @@ export function runHeapOperation(
   operation: HeapOperationName,
   options: HeapOperationOptions = {},
 ): Promise<DiagnosticPreparationResponse> {
-  return request<DiagnosticPreparationResponse>(
+  return request<DiagnosticJobStatus>(
     `/api/v1/cases/${encodeURIComponent(caseId)}/diagnostics/heap/${encodeURIComponent(operation)}`,
     { method: "POST", body: JSON.stringify(options) },
-  );
+  ).then(async (job) => {
+    emitDiagnosticJob(job);
+    return waitForDiagnosticJob(job.id);
+  });
 }
 
 // These named operations are intended for the agent/tool adapter to call.
