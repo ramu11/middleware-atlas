@@ -1,168 +1,119 @@
 # Middleware Atlas
 
-**A local-first, model-agnostic AI copilot for middleware troubleshooting
-and support engineering.**
+**A local-first support-engineering copilot for middleware and JVM diagnostics.**
 
-Middleware Atlas helps engineers investigate customer cases involving:
+Middleware Atlas keeps case metadata, uploaded artifacts, diagnostic outputs, and agent conversations on the workstation. The Rust backend runs the diagnostic flow, calls a local Ollama model directly, and invokes fixed Eclipse Memory Analyzer (MAT) operations inside a local Docker or Podman container when a container runtime is available.
 
-- Apache Kafka and ActiveMQ Artemis
-- Debezium and Kafka MirrorMaker 2
-- Java heap dumps and thread dumps
-- RHEL sosreports
-- OpenShift and Red Hat OpenShift AI (RHOAI)
+## What is implemented
 
-## Architecture principles
+- Case creation and listing, artifact upload and deletion, filename-based artifact classification, upload size limits, and streaming SHA-256 hashing.
+- SQLite persistence for cases, artifact metadata, diagnostic tool runs, readable incident references, and agent conversation turns.
+- Local JVM thread-dump triage: bounded parsing of thread-state entries, blocked-thread names, lock mentions, and explicit deadlock markers.
+- Eclipse MAT heap-dump analysis through a constrained local container, when Docker or Podman is available. The fixed operations include Leak Suspects, heap overview, histogram, dominator tree, Paths to GC Roots, and heap comparison.
+- Local agent chat through the Ollama HTTP API. The agent uses recent SQLite conversation history and bounded diagnostic evidence; it can explain reports, distinguish observations from hypotheses, and ask for missing details.
+- Eight suggested questions in the UI and persistent conversation history across browser refreshes.
 
-- **Rust first:** Rust owns the application API, case management, artifact
-  lifecycle, security boundaries, diagnostic adapters and job execution.
-- **Dify for agent orchestration:** Use
-  [Dify](https://github.com/langgenius/dify) for configurable AI workflows,
-  knowledge retrieval and model-driven tool orchestration.
-- **Model agnostic:** Select and change the model through Dify/provider
-  configuration rather than coupling application code to one model.
-- **Pluggable tools:** Diagnostic capabilities implement stable contracts.
-  MAT is the first planned adapter; future tools must not require rewriting
-  the core application.
-- **Python only where useful:** Python may implement a specialist adapter
-  when its ecosystem offers a concrete advantage. It is not the core backend.
-- **Evidence-backed findings:** Distinguish observations, hypotheses and
-  confirmed causes. Preserve references to source artifacts and report sections.
-- **Local-first:** Support local inference providers, including a compatible
-  Qwen serving endpoint, subject to Dify's provider configuration.
-- **Safe execution:** The LLM must never receive unrestricted shell access.
+Artifact classification is not the same as analysis: Kafka, Artemis, Debezium, sosreport, and OpenShift artifacts can be classified, but specialized analyzers for those artifact types are not all implemented yet.
 
-## System architecture
+## Architecture
 
-    React / Next.js UI
-            |
-            v
-    Rust application API (Axum)
-       |              |
-       |              +--> Tool adapter registry
-       |                       |
-       |                       +--> Eclipse MAT
-       |                       +--> Log analyzers
-       |                       +--> Thread-dump analyzers
-       |                       +--> RHEL sosreport analyzers
-       |                       +--> Future diagnostic tools
-       |
-       +--> Dify API
-                 |
-                 +--> Configured LLM provider/model
-                 +--> Knowledge retrieval
-                 +--> Workflows and agent orchestration
-                 +--> Approved tool integrations
+```text
+Browser: Next.js / React
+          |
+          | HTTP API and artifact uploads
+          v
+Rust API: Axum
+  |       |             |
+  |       |             +--> Local filesystem: artifacts and workspaces
+  |       +----------------> SQLite: cases, tool runs, agent messages
+  |
+  +--> Local thread-dump parser
+  |
+  +--> Docker / Podman --> constrained Eclipse MAT worker (heap dumps)
+  |
+  +--> Ollama at 127.0.0.1:11434 --> locally installed model
+```
 
-Dify handles AI workflow orchestration. Rust remains the trusted control
-plane for case authorization, artifact access, tool execution, resource
-limits and audit records.
+The browser talks only to the Rust API. The backend selects diagnostic behavior from validated artifact kinds and fixed operation names; the chat model is not given arbitrary shell access and does not independently invoke tools. Ollama calls are made directly by Rust, not through a hosted orchestration service.
 
-## Planned stack
+## Prerequisites
 
-| Area | Technology |
-|---|---|
-| Primary language | Rust |
-| Backend/API | Tokio, Axum, Serde |
-| UI | Next.js, React, TypeScript |
-| UI components | Tailwind CSS, shadcn/ui |
-| AI orchestration | Dify, accessed through its API |
-| Model selection | Dify-configured provider/model; local Qwen supported through a compatible provider |
-| Tool integration | Versioned tool contracts and Rust adapters |
-| Heap analysis | Eclipse MAT batch/query interface; evaluate Eclipse Jifa |
-| Case metadata | SQLite (SQLx, WAL mode) |
-| Artifact storage | Local filesystem initially; optional S3-compatible storage |
-| Optional specialist workers | Python behind narrow, versioned contracts |
+- Git.
+- Node.js and Rust versions pinned in `.nvmrc` and `rust-toolchain.toml`.
+- Ollama with a model downloaded to the local model store for agent chat.
+- Docker or Podman for actual Eclipse MAT execution on heap dumps. Without a usable container runtime, Atlas can prepare the request workspace but must report that MAT did not run.
 
-## Model agnosticism
+## Run locally
 
-Do not hard-code Qwen, model names, provider-specific payloads or inference
-endpoints into business logic.
+From the repository root, create an untracked `.env` file with your local model settings:
 
-Configure the model/provider in Dify. The application communicates with Dify
-through a configurable base URL and an API key supplied securely at runtime.
+```bash
+cat > .env <<'EOF'
+ATLAS_LLM_BASE_URL=http://127.0.0.1:11434
+ATLAS_LLM_MODEL=qwen3:8b
+ATLAS_LLM_SEND_HEAP_CONTEXT=true
+EOF
+```
 
-A model/provider is supported only if the selected Dify version and installed
-provider support the required capabilities. Tool calling, structured outputs,
-context length and streaming must be tested for each selected model.
+Install/start Ollama and pull the example model if it suits your hardware:
 
-## Pluggable diagnostic tools
+```bash
+ollama pull qwen3:8b
+ollama list
+curl -fsS http://127.0.0.1:11434/api/tags
+```
 
-Each tool should have:
-
-- A stable tool ID and version.
-- A typed input and output schema.
-- A description of supported operations.
-- Authorization and case-scope checks.
-- Execution timeout and resource limits.
-- Structured findings and evidence references.
-- Health/readiness information where applicable.
-- Audit records and consistent error responses.
-
-The first tool adapter is planned to wrap Eclipse MAT. Additional adapters
-may provide Kafka log analysis, Artemis diagnostics, thread-dump analysis,
-sosreport analysis, OpenShift inspection and internal support utilities.
-
-Dify can orchestrate approved tools, but tools that access customer artifacts
-must execute behind the trusted Rust service or another explicitly secured
-tool service. Never expose arbitrary filesystem access or arbitrary commands
-to the model.
-
-## Planned roadmap
-
-1. Rust workspace and API.
-2. Dify connectivity, configuration and health checks.
-3. Case workspace and artifact upload.
-4. Model-independent chat and workflow integration.
-5. Knowledge ingestion with product/version metadata.
-6. Pluggable log-analysis tools.
-7. Eclipse MAT heap-analysis adapter.
-8. Thread dumps, sosreports and OpenShift diagnostics.
-9. Evidence correlation and RCA.
-10. Evaluation against sanitized, previously resolved cases.
-
-## Development and local startup
-
-**Current implemented slice:** local case intake, Rust API, SQLite metadata, and filesystem-backed artifact uploads. Dify workflow orchestration and Eclipse MAT execution are not wired into the running app yet.
-
-Start the Rust API from the repository root in Terminal 1:
+Start the API in Terminal 1:
 
 ```bash
 cargo run -p atlas-api
 ```
 
-Start the web UI from `apps/web` in Terminal 2:
+Start the UI in Terminal 2:
 
 ```bash
 cd apps/web
-npm ci       # one-time install, or after dependency lockfile changes
+npm ci
 npm run dev
 ```
 
-Open `http://localhost:3000`. Check the API with `curl -fsS http://127.0.0.1:8080/health`.
+Open `http://localhost:3000`. The API defaults to `http://127.0.0.1:8080`; verify it with:
 
-Detailed instructions and component descriptions:
+```bash
+curl -fsS http://127.0.0.1:8080/health
+```
 
-- [Getting started and local runbook](docs/getting-started.md)
-- [Component map and implemented/planned boundaries](docs/components.md)
-- [Local development troubleshooting](docs/troubleshooting.md)
-- [Architecture](docs/architecture.md)
-- [Configuration](docs/configuration.md)
-- [Persistence and API](docs/persistence.md)
+If the browser must use another API address, configure `NEXT_PUBLIC_ATLAS_API_BASE_URL` in `apps/web/.env.local` and restart Next.js. Never put secrets in `NEXT_PUBLIC_*` values.
 
-Run checks before committing:
+See [Getting started](docs/getting-started.md), [Local agent setup](docs/local-agent.md), [Architecture](docs/architecture.md), [Configuration](docs/configuration.md), [Persistence and API](docs/persistence.md), [Component map](docs/components.md), and [Troubleshooting](docs/troubleshooting.md).
+
+## Local inference and privacy boundary
+
+The default model endpoint is `http://127.0.0.1:11434`. The Rust backend accepts only plain-HTTP loopback URLs, disables HTTP proxies and redirects for these requests, verifies that the selected model is already installed in Ollama, and rejects model names containing `cloud`. It does not require an API key for local Ollama.
+
+`ATLAS_LLM_SEND_HEAP_CONTEXT` controls whether bounded local diagnostic context is attached to chat requests; it defaults to enabled when unset. Raw heap dumps and MAT index/cache files are not sent to the model. The agent context collector selects specific local summaries/manifests and bounded MAT report excerpts; it does not upload the original dump as chat context.
+
+The API is a local single-user development service without user authentication or multi-user authorization. Keep it bound to loopback and do not expose it to a network. Local inference does not make the application production-ready by itself.
+
+## Development checks
+
+From the repository root:
 
 ```bash
 cargo fmt --all -- --check
 cargo test --workspace
-(cd apps/web && npm run typecheck && npm run lint && npm run build)
 ```
 
-## Security
+From `apps/web`:
 
-- Never commit customer artifacts, generated reports, model weights, secrets
-  or real case data.
-- Keep Dify API keys on the server; never expose them to the browser.
-- Isolate case artifacts and validate every artifact ID.
-- Run archive extraction, MAT and other parsers in constrained workers.
-- Use allowlisted diagnostic operations rather than arbitrary shell commands.
-- Apply timeouts, resource quotas, access controls and retention policies.
+```bash
+npm run typecheck
+npm run lint
+npm run build
+```
+
+Do not commit `.env`, local databases, `data/`, customer artifacts, generated reports, model weights, or local backups.
+
+## Implemented versus planned
+
+Implemented flows are case/artifact persistence, local thread-dump triage, constrained MAT heap operations when a local container runtime is usable, and Ollama-backed evidence-led chat. Broader Kafka/Artemis log analytics, Debezium-specific analysis, sosreport/OpenShift analyzers, a dedicated evidence explorer, and fully structured evidence-backed RCA workflows remain future work. The agent's output is investigative guidance, not a substitute for validating conclusions against the original diagnostic evidence.

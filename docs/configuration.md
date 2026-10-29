@@ -1,45 +1,76 @@
 # Configuration and local data layout
 
-Middleware Atlas loads `config/default.toml` at startup. This file contains non-secret application settings and the artifact/product classification rules. Environment variables override supported settings; secrets such as the local Ollama endpoint stay in the local `.env` file and are never placed in TOML or committed.
+Middleware Atlas reads non-secret defaults from `config/default.toml` and selected environment overrides. Create a repository-root `.env` for local backend settings and keep it untracked. Do not place credentials in TOML or expose them through frontend `NEXT_PUBLIC_*` variables.
 
-## Project-relative paths
+## Local data layout
 
-By default the data directory is `<project-root>/data`, containing:
+The default data directory is `<project-root>/data`:
 
 ```text
 data/
 ├── middleware-atlas.db
 ├── artifacts/<case-id>/<artifact-id>/original
-├── work/
+├── work/<case-id>/...
 └── reports/
 ```
 
-Relative paths in `storage.data_dir` and `ATLAS_DATA_DIR` are always resolved from the project root, independently of the directory from which `cargo run` was launched. Absolute paths and `~/...` paths are also supported. `ATLAS_PROJECT_DIR` can override the detected project root, but must be absolute. `ATLAS_CONFIG_FILE` can select another TOML file; relative config-file paths are also anchored to the project root.
+SQLite stores case/artifact metadata, diagnostic tool-run records, readable incident references and agent messages. Uploaded files and generated reports/workspaces live on disk. Do not commit `data/`.
 
-## Supported environment overrides
+Relative `storage.data_dir` and `ATLAS_DATA_DIR` paths are resolved from the project root, regardless of the shell's current directory. Absolute paths and `~/...` paths are supported. `ATLAS_PROJECT_DIR` can override the detected project root but must be absolute. `ATLAS_CONFIG_FILE` selects another TOML file; relative paths are anchored to the project root.
+
+## Server and persistence environment variables
 
 - `ATLAS_PROJECT_DIR`: absolute project root, optional.
-- `ATLAS_CONFIG_FILE`: TOML config path, optional.
-- `ATLAS_BIND_ADDR`: listener address; defaults to loopback `127.0.0.1:8080`.
-- `ATLAS_WEB_ORIGIN`: allowed browser origin; defaults to `http://localhost:3000`.
-- `ATLAS_DATA_DIR`: absolute path, `~/...`, or path relative to project root.
-- `ATLAS_MAX_UPLOAD_BYTES`: per-file byte limit.
+- `ATLAS_CONFIG_FILE`: TOML configuration path, optional.
+- `ATLAS_BIND_ADDR`: API listen address; default `127.0.0.1:8080`.
+- `ATLAS_WEB_ORIGIN`: allowed frontend origin; default `http://localhost:3000`.
+- `ATLAS_DATA_DIR`: data directory, absolute, `~/...`, or project-root-relative.
+- `ATLAS_MAX_UPLOAD_BYTES`: per-file upload limit; default 100 GiB.
 - `ATLAS_DB_MAX_CONNECTIONS`: SQLite pool upper bound.
 - `ATLAS_DB_BUSY_TIMEOUT_SECONDS`: SQLite lock wait timeout.
 
-Environment values override TOML. Blank values in `.env` are treated as unset. Invalid values fail startup instead of silently falling back to defaults.
+Environment variables override the corresponding TOML settings. Blank values loaded from `.env` are treated as unset; invalid supported values should be corrected rather than silently assumed to work.
 
-## Custom artifact classification
+## Local Ollama agent variables
 
-Add or reorder `[[diagnostics.artifact_rules]]` entries in TOML. Rules are evaluated top-to-bottom. `match_mode = "any"` matches any filename token or extension; `match_mode = "all"` requires both a configured token and an extension. Keep specific products before generic file/archive rules. `kind` remains a stable machine-oriented classification; `product` is the human-readable product label exposed by the API.
+Use these in the repository-root `.env`:
 
-## Data migration note
+```dotenv
+ATLAS_LLM_BASE_URL=http://127.0.0.1:11434
+ATLAS_LLM_MODEL=qwen3:8b
+ATLAS_LLM_SEND_HEAP_CONTEXT=true
+```
 
-Changing the default path does not move an existing database automatically. Stop the API before copying the old local data to the project directory. On Linux, if you need to keep the previously created store, use this from the repository root:
+- `ATLAS_LLM_BASE_URL`: local Ollama HTTP origin. The backend only accepts plain HTTP loopback hosts such as `127.0.0.1`, `localhost`, or IPv6 loopback. Remote and LAN endpoints are blocked.
+- `ATLAS_LLM_MODEL`: name of a model already installed in local Ollama. The code defaults to `qwen3:8b`; model names containing `cloud` are rejected.
+- `ATLAS_LLM_SEND_HEAP_CONTEXT`: attach bounded local diagnostic context to new agent chat requests. Defaults to enabled (`true`) when unset. Set to `false` to keep report/summary context out of model requests; chat itself remains available.
+
+The Rust API disables environment proxies and HTTP redirects for its Ollama client and verifies the model against the local `/api/tags` list before sending a chat request. No remote model-provider configuration or API key is used by this agent path.
+
+## Eclipse MAT container settings
+
+- `ATLAS_MAT_RUNTIME`: `auto` (default), `docker`, or `podman`.
+- `ATLAS_MAT_IMAGE`: local MAT worker image reference; default `middleware-atlas/mat:1.17.0`.
+- `ATLAS_MAT_BUILD_CONTEXT`: optional override for the image build context; repository default is `tools/mat`.
+- `ATLAS_MAT_DOCKER_MEMORY`: container memory limit; default `6g`.
+- `ATLAS_MAT_DOCKER_CPUS`: CPU limit; default `2`.
+- `ATLAS_MAT_JAVA_MAX_HEAP`: Java heap passed to MAT; default `4g`.
+- `ATLAS_MAT_TIMEOUT_SECONDS`: operation timeout; default `7200` seconds.
+- `ATLAS_MAT_MAX_CONCURRENT_JOBS`: concurrent MAT job limit; default `1`, clamped to the range 1–8.
+
+A working local container runtime is required for actual MAT execution. The first build of the project-owned image needs network access to download the Eclipse MAT distribution. The one-shot analysis container itself runs without network access. MAT generates index files and needs extra local disk space, so Atlas works in an isolated copy rather than modifying the saved original artifact.
+
+## Artifact classification
+
+Edit or reorder `[[diagnostics.artifact_rules]]` in `config/default.toml`. Rules are checked top-to-bottom. `match_mode = "any"` matches a configured filename token or extension; `match_mode = "all"` requires a configured token and extension. Keep specific product rules before generic archive/text rules. `kind` is the stable machine classification used for backend routing; `product` is the readable label. Only supported kinds have diagnostic plugins—classification does not imply that an analyzer exists for each product.
+
+## Moving existing data
+
+Changing `storage.data_dir` does not automatically move an existing database. Stop the API before copying the old local data. If migrating from `$HOME/.local/share/middleware-atlas` on Linux, copy while the application is stopped so SQLite database/WAL files remain consistent:
 
 ```bash
 mkdir -p data
 cp -a "$HOME/.local/share/middleware-atlas/." data/
 ```
 
-Do this only while the API is stopped so SQLite's database and WAL files are copied consistently. Do not commit `data/`; it contains case metadata and potentially sensitive customer artifacts.
+The data directory can contain sensitive incident metadata, conversations, original files, and generated reports. Keep it local and ignored by Git.

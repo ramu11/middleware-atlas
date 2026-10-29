@@ -200,7 +200,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let app = Router::new()
         .route(constants::HEALTH_ROUTE, get(health))
         .route(constants::CASES_ROUTE, get(list_cases).post(create_case))
-        .route(constants::CASE_ROUTE, get(get_case).patch(update_case))
+        .route(constants::CASE_ROUTE, get(get_case).patch(update_case).delete(delete_case))
         .route(
             constants::CASE_ARTIFACTS_ROUTE,
             get(list_artifacts)
@@ -1003,6 +1003,43 @@ async fn update_case(
     Ok(Json(record))
 }
 
+async fn delete_case(
+    State(state): State<AppState>,
+    Path(case_id): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    require_uuid(&case_id)?;
+
+    // Delete the database row first. The schema's ON DELETE CASCADE relationships
+    // remove artifacts, findings, tool runs, and agent messages in the same DB operation.
+    let mut transaction = state.pool.begin().await?;
+    let result = sqlx::query(queries::DELETE_CASE)
+        .bind(&case_id)
+        .execute(&mut *transaction)
+        .await?;
+    if result.rows_affected() == 0 {
+        return Err(ApiError::not_found());
+    }
+    transaction.commit().await?;
+
+    // Only case-scoped directories are removed. If filesystem cleanup fails after
+    // the database delete, log it so the API does not misreport the delete as failed.
+    for bucket in [constants::ARTIFACTS_DIR, constants::WORK_DIR] {
+        let path = state.data_dir.join(bucket).join(&case_id);
+        if let Err(cleanup_error) = fs::remove_dir_all(&path).await
+            && cleanup_error.kind() != std::io::ErrorKind::NotFound
+        {
+            error!(
+                case_id = %case_id,
+                path = %path.display(),
+                error = %cleanup_error,
+                "Case was deleted from SQLite but local directory cleanup failed"
+            );
+        }
+    }
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
 async fn list_artifacts(
     State(state): State<AppState>,
     Path(case_id): Path<String>,
@@ -1300,7 +1337,7 @@ async fn prepare_diagnostics(
     Ok(Json(PrepareDiagnosticsResponse {
         case_id,
         status: "prepared".to_owned(),
-        message: "Local diagnostic preparation completed. Thread dumps were summarized locally; when Docker is available, heap dumps are analyzed by the MAT container. When explicitly enabled and configured, only bounded MAT text/CSV context is sent to Dify; raw heap dumps and MAT indexes are never sent.".to_owned(),
+        message: "Local diagnostic preparation completed. Thread dumps were summarized locally; heap dumps are analyzed with fixed Eclipse MAT operations when a usable Docker or Podman runtime is available. When enabled, bounded local diagnostic context can be attached to the direct local Ollama chat request; raw heap dumps and MAT indexes are excluded.".to_owned(),
         preparations,
     }))
 }

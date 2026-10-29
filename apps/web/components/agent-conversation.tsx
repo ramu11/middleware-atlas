@@ -1,12 +1,17 @@
 "use client";
 
 import { useEffect, useState, type FormEvent, type KeyboardEvent } from "react";
-import { ArrowUpRight, Bot, FileSearch, MessageSquareText, Plus, Sparkles, UserRound } from "lucide-react";
-import { getCase, listAgentMessages, sendAgentChat, type AgentMessage, type DiagnosticPreparationResponse } from "@/lib/atlas-api";
+import { ArrowUpRight, Bot, FileSearch, FileText, MessageSquareText, Plus, Sparkles, UserRound, X } from "lucide-react";
+import { createCase, getCase, listAgentMessages, sendAgentChat, type AgentMessage, type DiagnosticPreparationResponse } from "@/lib/atlas-api";
+
+type StagedAttachment = { id: string; name: string; size: number };
 
 type AgentConversationProps = {
   onPrepare: (problemDescription: string) => Promise<DiagnosticPreparationResponse>;
   hasStagedFiles: boolean;
+  stagedFiles: StagedAttachment[];
+  onAttachFiles: () => void;
+  onRemoveStagedFile: (id: string) => void;
   onNewInvestigation: () => void;
 };
 
@@ -15,14 +20,9 @@ type LocalRun = { id: string; description: string; result: DiagnosticPreparation
 const ACTIVE_CASE_KEY = "atlas.agent.activeCaseId";
 const SESSION_CASE_KEY = "atlas.agentSessionCaseId";
 const QUICK_PROMPTS = [
-  "Summarize the heap dump findings and likely causes",
-  "Explain the Leak Suspects report in plain language",
-  "Which classes or objects retain the most memory?",
-  "Show the most important dominators and what they mean",
-  "What paths to GC roots should I investigate next?",
-  "Compare the current findings with a baseline heap dump",
-  "Analyze the thread states and check for possible deadlocks",
-  "What additional evidence or version details do you need from me?",
+  "Analyze this heap dump for memory-leak suspects",
+  "Review this thread dump for blocked threads or deadlocks",
+  "Explain the findings and recommend the next diagnostic steps",
 ];
 
 function newLocalId(): string {
@@ -30,7 +30,7 @@ function newLocalId(): string {
   return `run-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 }
 
-export function AgentConversation({ onPrepare, hasStagedFiles, onNewInvestigation }: AgentConversationProps) {
+export function AgentConversation({ onPrepare, hasStagedFiles, stagedFiles, onAttachFiles, onRemoveStagedFile, onNewInvestigation }: AgentConversationProps) {
   const [draft, setDraft] = useState("");
   const [caseId, setCaseId] = useState<string | null>(null);
   const [incidentRef, setIncidentRef] = useState("");
@@ -43,24 +43,66 @@ export function AgentConversation({ onPrepare, hasStagedFiles, onNewInvestigatio
 
   useEffect(() => {
     let cancelled = false;
-    const restore = async () => {
+    let selectionGeneration = 0;
+    const loadCase = async (storedId: string) => {
+      const requestGeneration = ++selectionGeneration;
       try {
-        const storedId = window.localStorage.getItem(ACTIVE_CASE_KEY) || window.sessionStorage.getItem(SESSION_CASE_KEY);
-        if (!storedId) return;
         const [record, history] = await Promise.all([getCase(storedId), listAgentMessages(storedId)]);
-        if (cancelled) return;
-        window.sessionStorage.setItem(SESSION_CASE_KEY, storedId);
+        if (cancelled || requestGeneration !== selectionGeneration) return;
+        try {
+          window.localStorage.setItem(ACTIVE_CASE_KEY, storedId);
+          window.sessionStorage.setItem(SESSION_CASE_KEY, storedId);
+        } catch { /* The API remains authoritative if browser storage is disabled. */ }
         setCaseId(storedId);
         setIncidentRef(record.display_id);
         setMessages(history);
+        setError("");
       } catch (cause) {
-        if (!cancelled) setError(cause instanceof Error ? cause.message : "Could not restore the previous agent conversation.");
+        if (!cancelled) setError(cause instanceof Error ? cause.message : "Could not restore the agent conversation.");
       } finally {
-        if (!cancelled) setRestoring(false);
+        if (!cancelled && requestGeneration === selectionGeneration) setRestoring(false);
       }
     };
+    const restore = async () => {
+      let storedId: string | null = null;
+      try {
+        storedId = window.localStorage.getItem(ACTIVE_CASE_KEY) || window.sessionStorage.getItem(SESSION_CASE_KEY);
+      } catch { /* Storage can be disabled by browser policy. */ }
+      if (storedId) await loadCase(storedId);
+      else if (!cancelled) setRestoring(false);
+    };
+    const onCaseSelected = (event: Event) => {
+      const selectedId = (event as CustomEvent<{ caseId?: string }>).detail?.caseId;
+      if (!selectedId) return;
+      setRestoring(true);
+      setStatus("");
+      setError("");
+      setRuns([]);
+      setMessages([]);
+      setCaseId(selectedId);
+      setIncidentRef("");
+      void loadCase(selectedId);
+    };
+    const onNewChat = () => {
+      selectionGeneration += 1;
+      setCaseId(null);
+      setIncidentRef("");
+      setMessages([]);
+      setRuns([]);
+      setDraft("");
+      setStatus("");
+      setError("");
+      setRestoring(false);
+    };
+    window.addEventListener("atlas:case-selected", onCaseSelected);
+    window.addEventListener("atlas:new-chat", onNewChat);
     void Promise.resolve().then(restore);
-    return () => { cancelled = true; };
+    return () => {
+      cancelled = true;
+      selectionGeneration += 1;
+      window.removeEventListener("atlas:case-selected", onCaseSelected);
+      window.removeEventListener("atlas:new-chat", onNewChat);
+    };
   }, []);
 
   async function submitMessage(event: FormEvent<HTMLFormElement>) {
@@ -72,7 +114,18 @@ export function AgentConversation({ onPrepare, hasStagedFiles, onNewInvestigatio
     setError("");
     let currentCaseId = caseId || window.localStorage.getItem(ACTIVE_CASE_KEY) || window.sessionStorage.getItem(SESSION_CASE_KEY);
     try {
-      // Initial intake or new uploads: persist evidence and run only the matching local plugin.
+      // A conversation can start with text alone; files are optional until a diagnostic run is requested.
+      if (!currentCaseId && !hasStagedFiles) {
+        const title = `Incident: ${content.replace(/\s+/g, " ")}`.slice(0, 140);
+        const created = await createCase(title);
+        currentCaseId = created.id;
+        setCaseId(currentCaseId);
+        setIncidentRef(created.display_id);
+        window.localStorage.setItem(ACTIVE_CASE_KEY, currentCaseId);
+        window.sessionStorage.setItem(SESSION_CASE_KEY, currentCaseId);
+        window.dispatchEvent(new CustomEvent("atlas:case-saved", { detail: { caseId: currentCaseId } }));
+      }
+      // When new files are attached, save them and run only the matching local diagnostic plugin.
       if (!currentCaseId || hasStagedFiles) {
         const result = await onPrepare(content);
         currentCaseId = result.case_id;
@@ -148,7 +201,7 @@ export function AgentConversation({ onPrepare, hasStagedFiles, onNewInvestigatio
       </div>
 
       <div className="agent-quick-prompts">
-        <span className="agent-section-label">SUGGESTED QUESTIONS · 8 OPTIONS</span>
+        <span className="agent-section-label">SUGGESTED STARTING POINTS</span>
         <div className="agent-prompt-chips">
           {QUICK_PROMPTS.map((prompt) => (
             <button className="agent-prompt-chip" key={prompt} type="button" disabled={working || restoring} onClick={() => { setDraft(prompt); setStatus(""); setError(""); }}>
@@ -188,7 +241,30 @@ export function AgentConversation({ onPrepare, hasStagedFiles, onNewInvestigatio
         </div>
       )}
 
+      {caseId && runs.length === 0 && messages.length === 0 && !restoring && (
+        <div className="agent-empty-thread" role="status">
+          <div className="agent-empty-thread-icon"><MessageSquareText size={17} /></div>
+          <div>
+            <strong>{incidentRef ? `You're viewing ${incidentRef}` : "Incident conversation"}</strong>
+            <p>This incident has no saved chat turns yet. Continue here to start or resume the conversation; its saved artifacts and diagnostic outputs remain attached to this case.</p>
+          </div>
+        </div>
+      )}
+
       <form className="agent-composer" onSubmit={submitMessage}>
+        {stagedFiles.length > 0 && (
+          <div className="agent-attachments" aria-label="Files ready to attach">
+            {stagedFiles.map((file) => (
+              <span className="agent-attachment-chip" key={file.id} title={`${file.name} · ${file.size.toLocaleString()} bytes`}>
+                <FileText size={13} />
+                <span>{file.name}</span>
+                <button type="button" aria-label={`Remove ${file.name}`} title={`Remove ${file.name}`} onClick={() => onRemoveStagedFile(file.id)} disabled={working || restoring}>
+                  <X size={12} />
+                </button>
+              </span>
+            ))}
+          </div>
+        )}
         <label className="agent-composer-label" htmlFor="atlas-agent-prompt">Problem description or follow-up question</label>
         <textarea
           id="atlas-agent-prompt"
@@ -202,7 +278,12 @@ export function AgentConversation({ onPrepare, hasStagedFiles, onNewInvestigatio
           placeholder="Describe the symptoms, ask what the MAT report means, or answer the agent's follow-up question…"
         />
         <div className="agent-composer-footer">
-          <span>Ctrl/⌘ + Enter to send · {draft.length}/12,000 {restoring ? "· restoring conversation…" : hasStagedFiles ? "· new files will be analyzed" : "· conversation history is saved locally"}</span>
+          <div className="agent-composer-tools">
+            <button className="agent-attach-button" type="button" onClick={onAttachFiles} disabled={working || restoring} aria-label="Attach diagnostic files" title="Attach a heap or thread dump">
+              <Plus size={19} />
+            </button>
+            <span className="agent-composer-hint">Ctrl/⌘ + Enter · {draft.length}/12,000 {restoring ? "· loading incident…" : hasStagedFiles ? `· ${stagedFiles.length} file(s) ready` : "· saved locally"}</span>
+          </div>
           <button className="button button-primary agent-queue-button" type="submit" disabled={!draft.trim() || working || restoring}>
             {working ? "Working…" : "Send to Atlas"} {!working && <ArrowUpRight size={15} />}
           </button>

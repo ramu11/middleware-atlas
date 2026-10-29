@@ -1,17 +1,31 @@
 "use client";
 
 import {
-  Activity, ArrowDownToLine, Atom, Boxes,
-  Check, ChevronDown, CircleHelp, Clock3,
-  CloudUpload, Command, FileArchive, FileCode2,
-  FileSearch, FileText, FolderOpen, HardDrive,
-  Layers3, LifeBuoy, Menu, Network,
-  Plus, Search, Server, ShieldCheck,
-  Trash2, Upload, X,
+  Activity,
+  ArrowDownToLine,
+  Check,
+  Clock3,
+  CloudUpload,
+  FileArchive,
+  FileCode2,
+  FileSearch,
+  FileText,
+  FolderOpen,
+  Layers3,
+  LifeBuoy,
+  Menu,
+  Network,
+  Plus,
+  Search,
+  Server,
+  ShieldCheck,
+  Trash2,
+  Upload,
+  X,
 } from "lucide-react";
-import { useCallback, useMemo, useRef, useState, type ChangeEvent, type DragEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent, type DragEvent } from "react";
 import { sha256Blob } from "@/lib/sha256-stream";
-import { createCase, listArtifacts, listCases, prepareDiagnostics, uploadArtifact, type AtlasArtifact } from "@/lib/atlas-api";
+import { createCase, deleteCase, listArtifacts, listCases, prepareDiagnostics, uploadArtifact, type AtlasArtifact, type AtlasCase } from "@/lib/atlas-api";
 import { AgentConversation } from "@/components/agent-conversation";
 
 type ArtifactKind =
@@ -29,6 +43,8 @@ type UploadState = {
   progress: number;
   error?: string;
 };
+
+type WorkspaceView = "incidents" | "jvm" | "platform";
 
 function createArtifactId(): string {
   if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
@@ -111,6 +127,116 @@ export default function Home() {
   const [showMenu, setShowMenu] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
   const [agentSessionCaseId, setAgentSessionCaseId] = useState<string | null>(null);
+  const [activeView, setActiveView] = useState<WorkspaceView>("jvm");
+  const [savedCases, setSavedCases] = useState<AtlasCase[]>([]);
+  const [savedCasesLoading, setSavedCasesLoading] = useState(true);
+  const [savedCasesError, setSavedCasesError] = useState("");
+  const [selectedCaseId, setSelectedCaseId] = useState<string | null>(null);
+  const [deletingCaseId, setDeletingCaseId] = useState<string | null>(null);
+
+  const refreshSavedCases = useCallback(async () => {
+    setSavedCasesLoading(true);
+    try {
+      const records = await listCases();
+      setSavedCases(records);
+      try {
+        const activeId = window.localStorage.getItem("atlas.agent.activeCaseId")
+          || window.sessionStorage.getItem("atlas.agentSessionCaseId");
+        if (activeId && records.some((record) => record.id === activeId)) setSelectedCaseId(activeId);
+      } catch { /* Browser storage may be disabled; incident selection still works in this session. */ }
+      setSavedCasesError("");
+    } catch (error) {
+      setSavedCasesError(error instanceof Error ? error.message : "Could not load saved incidents.");
+    } finally {
+      setSavedCasesLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    const onCaseSaved = () => { void refreshSavedCases(); };
+    window.addEventListener("atlas:case-saved", onCaseSaved);
+    void Promise.resolve().then(refreshSavedCases);
+    return () => window.removeEventListener("atlas:case-saved", onCaseSaved);
+  }, [refreshSavedCases]);
+
+  const openSavedCase = (record: AtlasCase) => {
+    try {
+      window.localStorage.setItem("atlas.agent.activeCaseId", record.id);
+      window.sessionStorage.setItem("atlas.agentSessionCaseId", record.id);
+    } catch { /* The API remains authoritative if browser storage is disabled. */ }
+    setAgentSessionCaseId(record.id);
+    setSelectedCaseId(record.id);
+    setActiveView("jvm");
+    setShowMenu(false);
+    window.dispatchEvent(new CustomEvent("atlas:case-selected", { detail: { caseId: record.id, name: record.name } }));
+  };
+
+  const clearActiveCase = () => {
+    setAgentSessionCaseId(null);
+    setSelectedCaseId(null);
+    setPersistedArtifacts([]);
+    setUploadStates({});
+    try {
+      const activeId = window.localStorage.getItem("atlas.agent.activeCaseId");
+      if (activeId && window.localStorage.getItem("atlas.currentCaseId") === activeId) {
+        window.localStorage.removeItem("atlas.currentCaseId");
+      }
+      window.localStorage.removeItem("atlas.agent.activeCaseId");
+      window.sessionStorage.removeItem("atlas.agentSessionCaseId");
+    } catch { /* Browser storage can be disabled by policy. */ }
+  };
+
+  const startNewChat = () => {
+    clearActiveCase();
+    setActiveView("jvm");
+    setShowMenu(false);
+    window.dispatchEvent(new CustomEvent("atlas:new-chat"));
+  };
+
+  const deleteSavedCase = async (record: AtlasCase) => {
+    const confirmed = window.confirm(
+      `Permanently delete "${record.name}"? This removes its chat history, uploaded diagnostic files, and generated case work from this machine. This cannot be undone.`,
+    );
+    if (!confirmed) return;
+
+    setDeletingCaseId(record.id);
+    setSavedCasesError("");
+    try {
+      await deleteCase(record.id);
+      const remaining = savedCases.filter((item) => item.id !== record.id);
+      setSavedCases(remaining);
+
+      try {
+        window.localStorage.removeItem(`atlas.uploadedFiles.${record.id}`);
+        if (window.localStorage.getItem("atlas.currentCaseId") === record.id) {
+          window.localStorage.removeItem("atlas.currentCaseId");
+        }
+        if (window.localStorage.getItem("atlas.agent.activeCaseId") === record.id) {
+          window.localStorage.removeItem("atlas.agent.activeCaseId");
+        }
+        if (window.sessionStorage.getItem("atlas.agentSessionCaseId") === record.id) {
+          window.sessionStorage.removeItem("atlas.agentSessionCaseId");
+        }
+      } catch { /* Database deletion remains authoritative if browser storage is unavailable. */ }
+
+      const wasActive = selectedCaseId === record.id || agentSessionCaseId === record.id;
+      if (wasActive) {
+        clearActiveCase();
+        if (activeView === "jvm" && remaining.length > 0) {
+          openSavedCase(remaining[0]);
+        } else if (activeView === "jvm") {
+          setActiveView("incidents");
+          window.dispatchEvent(new CustomEvent("atlas:new-chat"));
+        } else {
+          window.dispatchEvent(new CustomEvent("atlas:new-chat"));
+        }
+      }
+    } catch (cause) {
+      setSavedCasesError(cause instanceof Error ? cause.message : "Could not delete this incident.");
+    } finally {
+      setDeletingCaseId(null);
+    }
+  };
 
   const addFiles = useCallback((incoming: FileList | File[]) => {
     const selected = Array.from(incoming);
@@ -305,7 +431,7 @@ export default function Home() {
         } catch (error) {
           const message = error instanceof Error ? error.message : "Upload failed. Check the local API and retry.";
           setUploadStates((current) => ({ ...current, [key]: { status: "failed", progress: 0, error: message } }));
-          throw new Error(`Could not upload ${item.file.name}: ${message}`);
+          throw new Error(`Could not upload ${item.file.name}: ${message}`, { cause: error });
         }
       }
 
@@ -318,6 +444,7 @@ export default function Home() {
       setPersistedArtifacts(savedArtifacts);
       setPersistenceMessage("Evidence saved. Starting the matching diagnostic plugin…");
       const result = await prepareDiagnostics(targetCaseId, problem, diagnosticArtifacts.map((artifact) => artifact.id));
+      window.dispatchEvent(new CustomEvent("atlas:case-saved", { detail: { caseId: targetCaseId } }));
       setPersistenceMessage(`Diagnostic workflow finished with ${result.preparations.length} plugin result(s). Review each status and warning to confirm whether MAT actually ran.`);
       return result;
     } catch (error) {
@@ -341,38 +468,50 @@ return (
           <button className="mobile-close icon-button" onClick={() => setShowMenu(false)} aria-label="Close navigation"><X size={18} /></button>
         </a>
 
-        <div className="workspace-switcher">
-          <div className="workspace-avatar">M</div>
-          <div className="workspace-copy"><strong>My workspace</strong><small>Local environment</small></div>
-          <ChevronDown size={15} className="muted" />
-        </div>
-
-        <div className="nav-label">WORKSPACE</div>
-        <nav className="main-nav" aria-label="Main navigation">
-          <a className="nav-item active" href="#intake"><FolderOpen size={17} /><span>Case workspace</span><span className="nav-count">01</span></a>
-          <a className="nav-item" href="#artifacts"><HardDrive size={17} /><span>Artifacts</span></a>
-          <a className="nav-item" href="#analysis"><Activity size={17} /><span>Analysis runs</span></a>
-          <a className="nav-item" href="#evidence"><Network size={17} /><span>Evidence explorer</span><span className="soon-dot" /></a>
+        <nav className="main-nav simplified-nav" aria-label="Main navigation">
+          <button type="button" className={`nav-item ${activeView === "incidents" ? "active" : ""}`} onClick={() => { setActiveView("incidents"); setShowMenu(false); void refreshSavedCases(); }}>
+            <FolderOpen size={17} /><span>Incidents / Cases</span><span className="nav-count">{savedCases.length}</span>
+          </button>
+          <button type="button" className={`nav-item ${activeView === "jvm" ? "active" : ""}`} onClick={() => { setActiveView("jvm"); setShowMenu(false); }}>
+            <Activity size={17} /><span>JVM Diagnostics</span>
+          </button>
+          <button type="button" className={`nav-item ${activeView === "platform" ? "active" : ""}`} onClick={() => { setActiveView("platform"); setShowMenu(false); }}>
+            <Server size={17} /><span>Platform Diagnostics</span><span className="nav-soon">Soon</span>
+          </button>
         </nav>
 
-        <div className="nav-label nav-label-spaced">DIAGNOSTICS</div>
-        <nav className="main-nav" aria-label="Diagnostic tools">
-          <a className="nav-item" href="#kafka"><Boxes size={17} /><span>Kafka &amp; streaming</span></a>
-          <a className="nav-item" href="#jvm"><Atom size={17} /><span>JVM diagnostics</span></a>
-          <a className="nav-item" href="#platform"><Server size={17} /><span>Platform &amp; cluster</span></a>
-        </nav>
+        <section className="sidebar-thread-section" aria-label="Recent incidents">
+          <div className="sidebar-thread-heading-row">
+            <div className="nav-label sidebar-thread-heading">RECENT INCIDENTS</div>
+            <button type="button" className="sidebar-new-thread" onClick={startNewChat} aria-label="Start a new chat" title="Start a new chat"><Plus size={15} /></button>
+          </div>
+          {savedCasesLoading && savedCases.length === 0 ? (
+            <p className="sidebar-thread-empty">Loading incidents…</p>
+          ) : savedCases.length === 0 ? (
+            <p className="sidebar-thread-empty">No saved incidents yet.</p>
+          ) : (
+            <div className="sidebar-thread-list">
+              {savedCases.map((record) => (
+                <div className="sidebar-thread-row" key={record.id}>
+                  <button
+                    type="button"
+                    className={`nav-thread-item ${selectedCaseId === record.id ? "active" : ""}`}
+                    aria-current={selectedCaseId === record.id ? "page" : undefined}
+                    title={record.name}
+                    onClick={() => openSavedCase(record)}
+                  >
+                    <span className="nav-thread-name">{record.name}</span>
+                    <span className="nav-thread-ref">{record.display_id || "Local incident"}</span>
+                  </button>
+                  <button type="button" className="nav-thread-delete" onClick={() => void deleteSavedCase(record)} disabled={deletingCaseId === record.id} aria-label={`Delete incident ${record.name}`} title="Delete this chat thread"><Trash2 size={13} /></button>
+                </div>
+              ))}
+            </div>
+          )}
+        </section>
 
         <div className="sidebar-bottom">
-          <div className="local-card">
-            <div className="local-icon"><ShieldCheck size={17} /></div>
-            <div><strong>Local-first workspace</strong><p>Uploads are stored on this machine through the Rust API.</p></div>
-          </div>
-          <a className="nav-item" href="#help"><CircleHelp size={17} /><span>Help &amp; documentation</span></a>
-          <div className="profile-row">
-            <div className="profile-avatar">SE</div>
-            <div className="profile-copy"><strong>Support engineer</strong><small>Local session</small></div>
-            <button className="icon-button" title="Workspace options" onClick={() => setShowMenu(!showMenu)}><Command size={16} /></button>
-          </div>
+          <div className="sidebar-local-note"><ShieldCheck size={15} /><span>Local-first · data stays on this machine</span></div>
         </div>
       </aside>
 
@@ -382,7 +521,7 @@ return (
         <header className="topbar">
           <div className="breadcrumbs">
             <button className="mobile-menu icon-button" onClick={() => setShowMenu(true)} aria-label="Open navigation"><Menu size={19} /></button>
-            <span>Workspace</span><span className="crumb-slash">/</span><strong>Case intake</strong>
+            <span>Middleware Atlas</span><span className="crumb-slash">/</span><strong>{activeView === "incidents" ? "Incidents / Cases" : activeView === "platform" ? "Platform Diagnostics" : "JVM Diagnostics"}</strong>
           </div>
           <div className="topbar-actions">
             <span className="environment"><span className="status-dot" /> Local environment</span>
@@ -392,7 +531,64 @@ return (
           </div>
         </header>
 
-        <div className="content" id="intake">
+        <div className="content" id={activeView}>
+          {activeView === "incidents" && (
+            <section className="simple-page" aria-labelledby="incidents-title">
+              <header className="simple-page-header">
+                <div>
+                  <p className="simple-eyebrow">LOCAL WORKSPACE</p>
+                  <h1 id="incidents-title">Incidents / Cases</h1>
+                  <p>Saved investigations are listed here. Case details and diagnostic conversations stay on this machine.</p>
+                </div>
+                <div className="simple-page-actions">
+                  <button className="button button-primary" type="button" onClick={startNewChat}>
+                    <Plus size={15} /> New chat
+                  </button>
+                  <button className="button button-secondary" type="button" onClick={() => void refreshSavedCases()} disabled={savedCasesLoading}>
+                    {savedCasesLoading ? "Refreshing…" : "Refresh"}
+                  </button>
+                </div>
+              </header>
+              {savedCasesError && <div className="simple-error" role="alert">{savedCasesError}</div>}
+              {savedCasesLoading && savedCases.length === 0 ? (
+                <div className="simple-empty"><div className="simple-empty-icon"><FolderOpen size={22} /></div><h2>Loading saved cases</h2><p>Checking the local Atlas database…</p></div>
+              ) : savedCases.length === 0 ? (
+                <div className="simple-empty">
+                  <div className="simple-empty-icon"><FolderOpen size={22} /></div>
+                  <h2>No saved cases yet</h2>
+                  <p>Start a JVM investigation to create your first incident. You can begin with a question and attach a heap or thread dump whenever you have one.</p>
+                  <button className="button button-primary" type="button" onClick={() => setActiveView("jvm")}>Start an investigation</button>
+                </div>
+              ) : (
+                <div className="saved-case-list">
+                  {savedCases.map((record) => (
+                    <div className="saved-case-row" key={record.id}>
+                      <button className={`saved-case-card ${selectedCaseId === record.id ? "active" : ""}`} type="button" aria-current={selectedCaseId === record.id ? "page" : undefined} onClick={() => openSavedCase(record)}>
+                        <span className="saved-case-icon"><FolderOpen size={18} /></span>
+                        <span className="saved-case-copy"><strong>{record.name}</strong><small>{record.display_id || "Local incident"} · Updated {new Date(record.updated_at).toLocaleString()}</small></span>
+                        <ArrowDownToLine className="saved-case-open-icon" size={17} />
+                      </button>
+                      <button className="saved-case-delete" type="button" onClick={() => void deleteSavedCase(record)} disabled={deletingCaseId === record.id} aria-label={`Delete incident ${record.name}`} title="Delete this incident and its saved data">
+                        <Trash2 size={16} />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </section>
+          )}
+
+          {activeView === "platform" && (
+            <section className="simple-page platform-coming-soon" aria-labelledby="platform-title">
+              <div className="platform-icon"><Server size={25} /></div>
+              <p className="simple-eyebrow">PLATFORM DIAGNOSTICS</p>
+              <h1 id="platform-title">Coming soon</h1>
+              <p>Support for RHEL sosreport and OpenShift must-gather investigations is planned for a later phase. These artifacts may be identified during upload, but this diagnostic workflow is not implemented yet.</p>
+              <button className="button button-secondary" type="button" onClick={() => setActiveView("jvm")}>Return to JVM Diagnostics</button>
+            </section>
+          )}
+
+          <div className={`jvm-workspace-content ${activeView === "jvm" ? "" : "view-hidden"}`}>
           <div className="page-intro">
             <div>
               <div className="eyebrow"><span className="eyebrow-line" /> INCIDENT WORKSPACE <span className="eyebrow-dot">·</span> STEP 01 OF 03</div>
@@ -429,15 +625,6 @@ return (
               <span className="optional-pill">STEP 1</span>
             </div>
 
-            <input
-              ref={inputRef}
-              className="visually-hidden"
-              type="file"
-              multiple
-              onChange={onInputChange}
-              aria-label="Choose diagnostic files"
-            />
-
             <div
               className={`dropzone ${dragging ? "dropzone-active" : ""}`}
               onDragEnter={(event) => { event.preventDefault(); setDragging(true); }}
@@ -461,17 +648,15 @@ return (
             </div>
 
             <div className="supported-row">
-              <span className="supported-label">COMMON ARTIFACTS</span>
+              <span className="supported-label">SUPPORTED IN JVM DIAGNOSTICS</span>
               <div className="artifact-types">
-                <span><FileCode2 size={14} /> Logs</span>
-                <span><FileSearch size={14} /> JVM dumps</span>
-                <span><FileArchive size={14} /> sosreports</span>
-                <span><Network size={14} /> Cluster data</span>
+                <span><FileSearch size={14} /> Heap dumps</span>
+                <span><Activity size={14} /> Thread dumps</span>
               </div>
             </div>
           </section>
 
-          <section className="files-section" id="artifacts">
+          <section className={`files-section ${totalArtifactCount === 0 ? "files-section-empty" : ""}`} id="artifacts">
             <div className="files-heading">
               <div>
                 <h2>Case artifacts <span className="count-pill">{totalArtifactCount}</span></h2>
@@ -545,7 +730,22 @@ return (
             )}
           </section>
 
-          <AgentConversation onPrepare={handlePrepareDiagnostics} hasStagedFiles={artifacts.length > 0} onNewInvestigation={() => { setAgentSessionCaseId(null); try { window.sessionStorage.removeItem("atlas.agentSessionCaseId"); window.localStorage.removeItem("atlas.agent.activeCaseId"); } catch { /* storage can be disabled */ } }} />
+          <input
+            ref={inputRef}
+            className="visually-hidden"
+            type="file"
+            multiple
+            onChange={onInputChange}
+            aria-label="Attach heap or thread dump files"
+          />
+          <AgentConversation
+            onPrepare={handlePrepareDiagnostics}
+            hasStagedFiles={artifacts.length > 0}
+            stagedFiles={artifacts.map(({ id, file }) => ({ id, name: file.name, size: file.size }))}
+            onRemoveStagedFile={removeFile}
+            onAttachFiles={() => inputRef.current?.click()}
+            onNewInvestigation={clearActiveCase}
+          />
 
           <div className="bottom-actions">
             <div className="privacy-note"><ShieldCheck size={16} /><span><strong>Evidence-first by design</strong><br />Large dumps should be analyzed by diagnostic tools, not sent raw to an LLM.</span></div>
@@ -569,6 +769,7 @@ return (
             <span>Middleware Atlas <span className="footer-dot">·</span> Built for evidence-led troubleshooting</span>
             <span><span className="footer-status" /> Local workspace</span>
           </footer>
+          </div>
         </div>
       </section>
     </main>

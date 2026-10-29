@@ -73,6 +73,12 @@ export function updateCase(caseId: string, name: string): Promise<AtlasCase> {
   });
 }
 
+export function deleteCase(caseId: string): Promise<void> {
+  return request<void>(`/api/v1/cases/${encodeURIComponent(caseId)}`, {
+    method: "DELETE",
+  });
+}
+
 export function listArtifacts(caseId: string): Promise<AtlasArtifact[]> {
   return request<AtlasArtifact[]>(`/api/v1/cases/${encodeURIComponent(caseId)}/artifacts`);
 }
