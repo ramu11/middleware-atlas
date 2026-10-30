@@ -47,6 +47,28 @@ ATLAS_LLM_SEND_HEAP_CONTEXT=true
 
 The Rust API disables environment proxies and HTTP redirects for its Ollama client and verifies the model against the local `/api/tags` list before sending a chat request. No remote model-provider configuration or API key is used by this agent path.
 
+## Online technical research providers
+
+Online technical research is exposed through `POST /api/v1/knowledge/search`. The endpoint
+first uses the same local Ollama settings described above to classify the query. Classification
+fails closed when the local model is unavailable or returns an invalid decision. Only the
+sanitized current user query is sent to online providers; files and local diagnostic context
+are not accessible to that endpoint. See [Online technical knowledge research](knowledge-research.md)
+for the full API contract and privacy model.
+
+| Variable | Purpose |
+| --- | --- |
+| `ATLAS_BRAVE_SEARCH_API_KEY` | Brave Search API credential. When present, Brave is selected for the `web` provider. |
+| `ATLAS_SEARXNG_URL` | SearXNG base URL used when no Brave key is configured. Remote instances require HTTPS; HTTP is allowed only on loopback. |
+| `ATLAS_JIRA_INSTANCES` | JSON array of one to ten explicitly approved Jira instances (`name`, `base_url`, `api_version`). No Jira host is enabled by default. |
+| `ATLAS_RESEARCH_REDACT_TERMS` | Comma-separated organization-specific terms to redact from outbound search text. |
+| `ATLAS_RESEARCH_SECRET_KEYS` | Comma-separated additional credential-field labels recognized by the sanitizer. |
+| `ATLAS_RESEARCH_PRIVATE_HOST_SUFFIXES` | Comma-separated private DNS suffixes to redact in user queries. |
+
+Keep search credentials in the backend environment or a secret manager. Do not use
+`NEXT_PUBLIC_*` variables for credentials. The sanitizer is best-effort; configure known
+customer names and identifiers and review `sanitized_query` during rollout.
+
 ## Eclipse MAT container settings
 
 - `ATLAS_MAT_RUNTIME`: `auto` (default), `docker`, or `podman`.

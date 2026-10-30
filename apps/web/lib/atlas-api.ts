@@ -308,12 +308,46 @@ export function compare_heap_dumps(case_id: string, baseline_id: string, options
 }
 
 
+/** One bounded online reference attached to the assistant message that used it. */
+export type AgentResearchReference = {
+  provider: string;
+  source_type: string;
+  title: string;
+  url: string;
+  snippet: string;
+  updated_at?: string | null;
+};
+
+/** Availability metadata for one configured online provider. */
+export type AgentResearchProviderStatus = {
+  provider: string;
+  status: string;
+  message?: string | null;
+  result_count: number;
+};
+
+/** Privacy guarantees and sanitized query returned by the backend research boundary. */
+export type AgentResearch = {
+  status: string;
+  sanitized_query: string;
+  results: AgentResearchReference[];
+  providers: AgentResearchProviderStatus[];
+  privacy?: {
+    query_was_sanitized: boolean;
+    attachment_content_accessed_by_research?: boolean;
+    attachment_content_sent_to_providers?: boolean;
+    local_diagnostic_context_sent_to_providers?: boolean;
+    assistant_message_content_sent_to_providers?: boolean;
+  };
+};
+
 export type AgentMessage = {
   id: string;
   role: "user" | "assistant";
   content: string;
   provider_message_id?: string | null;
   created_at: string;
+  research?: AgentResearch | null;
 };
 
 export type AgentChatResponse = {
@@ -321,6 +355,7 @@ export type AgentChatResponse = {
   conversation_active: boolean;
   needs_more_info: boolean;
   evidence_attached: boolean;
+  research?: AgentResearch;
   messages: AgentMessage[];
 };
 

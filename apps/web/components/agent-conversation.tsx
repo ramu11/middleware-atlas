@@ -1,8 +1,8 @@
 "use client";
 
 import { useEffect, useState, type FormEvent, type KeyboardEvent } from "react";
-import { ArrowUpRight, Bot, FileSearch, FileText, MessageSquareText, Plus, Sparkles, UserRound, X } from "lucide-react";
-import { createCase, getCase, listAgentMessages, sendAgentChat, type AgentMessage, type DiagnosticPreparationResponse } from "@/lib/atlas-api";
+import { ArrowUpRight, Bot, ExternalLink, FileSearch, FileText, MessageSquareText, Plus, Sparkles, UserRound, X } from "lucide-react";
+import { createCase, getCase, listAgentMessages, sendAgentChat, type AgentMessage, type AgentResearch, type DiagnosticPreparationResponse } from "@/lib/atlas-api";
 
 type StagedAttachment = { id: string; name: string; size: number };
 
@@ -28,6 +28,99 @@ const QUICK_PROMPTS = [
 function newLocalId(): string {
   if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") return crypto.randomUUID();
   return `run-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+}
+
+/** Accept only absolute HTTP(S) URLs without embedded credentials for external navigation. */
+function safeResearchHref(value: string): string | null {
+  try {
+    const url = new URL(value);
+    if ((url.protocol !== "https:" && url.protocol !== "http:") || url.username || url.password) return null;
+    return url.toString();
+  } catch {
+    return null;
+  }
+}
+
+/** Converts provider status codes into concise labels for screen readers and users. */
+function researchStatusLabel(status: string): string {
+  switch (status) {
+    case "results": return "References found";
+    case "no_results": return "No references returned";
+    case "unavailable": return "Research unavailable; local answer is still available";
+    case "skipped_sensitive_query": return "Research skipped because too little safe query text remained";
+    default: return "Research status unavailable";
+  }
+}
+
+/** Renders provider health and safe, clickable references for one assistant answer. */
+function ResearchReferences({ research }: { research?: AgentResearch | null }) {
+  if (!research) return null;
+
+  const results = Array.isArray(research.results) ? research.results : [];
+  const providers = Array.isArray(research.providers) ? research.providers : [];
+  const statusTone = research.status === "results" ? "success"
+    : research.status === "unavailable" ? "warning" : "neutral";
+
+  return (
+    <section className="agent-research-panel" aria-label="Online research references">
+      <div className="agent-research-heading">
+        <div>
+          <strong>Online research</strong>
+          <span className={`agent-research-state agent-research-state-${statusTone}`}>{researchStatusLabel(research.status)}</span>
+        </div>
+        <span className="agent-research-count">{results.length} source{results.length === 1 ? "" : "s"}</span>
+      </div>
+
+      {providers.length > 0 && (
+        <div className="agent-research-providers" aria-label="Provider status">
+          {providers.map((provider, index) => (
+            <span className={`agent-research-provider ${provider.status === "ok" ? "is-available" : "is-unavailable"}`} key={`${provider.provider}-${index}`}>
+              <strong>{provider.provider}</strong>
+              <span>{provider.status === "ok" ? "Available" : provider.status === "misconfigured" ? "Configuration needed" : "Unavailable"}</span>
+              <span className="agent-research-provider-count">{provider.result_count} result{provider.result_count === 1 ? "" : "s"}</span>
+              {provider.message && <span className="agent-research-provider-message">{provider.message}</span>}
+            </span>
+          ))}
+        </div>
+      )}
+
+      {results.length > 0 ? (
+        <ol className="agent-research-results">
+          {results.map((reference, index) => {
+            const href = safeResearchHref(reference.url);
+            const sourceKind = reference.source_type === "jira" ? "Jira issue"
+              : reference.source_type === "web" ? "Web source" : reference.source_type;
+            return (
+              <li className="agent-research-result" key={`${reference.provider}-${reference.url}-${index}`}>
+                <div className="agent-research-result-meta">
+                  <span>{sourceKind}</span>
+                  <span>{reference.provider}</span>
+                  {reference.updated_at && <span>Source date: {reference.updated_at.slice(0, 80)}</span>}
+                </div>
+                {href ? (
+                  <a href={href} target="_blank" rel="noopener noreferrer nofollow" className="agent-research-link">
+                    <span>{reference.title || reference.url}</span><ExternalLink size={12} aria-hidden="true" />
+                  </a>
+                ) : (
+                  <span className="agent-research-link-disabled">{reference.title || "Reference URL unavailable"}</span>
+                )}
+                {reference.snippet && <p className="agent-research-snippet">{reference.snippet}</p>}
+              </li>
+            );
+          })}
+        </ol>
+      ) : (
+        <p className="agent-research-empty">{researchStatusLabel(research.status)}. The agent can still answer using local reasoning and any enabled local diagnostic evidence.</p>
+      )}
+
+      {research.sanitized_query && (
+        <details className="agent-research-query">
+          <summary>View sanitized search query</summary>
+          <p>{research.sanitized_query}</p>
+        </details>
+      )}
+    </section>
+  );
 }
 
 export function AgentConversation({ onPrepare, hasStagedFiles, stagedFiles, onAttachFiles, onRemoveStagedFile, onNewInvestigation }: AgentConversationProps) {
@@ -236,6 +329,7 @@ export function AgentConversation({ onPrepare, hasStagedFiles, stagedFiles, onAt
                 <time dateTime={message.created_at}>{new Date(message.created_at).toLocaleString()}</time>
               </div>
               <p>{message.content}</p>
+              {message.role === "assistant" && <ResearchReferences research={message.research} />}
             </article>
           ))}
         </div>

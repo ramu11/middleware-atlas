@@ -449,3 +449,34 @@ h1 span { color: #746ce2; }
   .simple-page-actions .button { padding: 9px 10px; font-size: 11px; }
   .saved-case-delete { width: 38px; flex-basis: 38px; }
 }
+
+/* Phase 2B: persistent online research references in agent conversation */
+.agent-research-panel { margin-top: 12px; padding: 11px 12px; border: 1px solid #e5e7f1; border-radius: 9px; background: #fff; }
+.agent-research-heading { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 9px; color: #424b61; font-size: 10px; }
+.agent-research-heading > div { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+.agent-research-state { display: inline-flex; align-items: center; border-radius: 999px; padding: 3px 7px; font-size: 9px; font-weight: 600; }
+.agent-research-state-success { color: #236a4d; background: #eaf7f0; }
+.agent-research-state-warning { color: #8a5b17; background: #fff5df; }
+.agent-research-state-neutral { color: #657086; background: #f0f2f7; }
+.agent-research-count { color: #858da0; font-size: 9px; white-space: nowrap; }
+.agent-research-providers { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 9px; }
+.agent-research-provider { display: inline-flex; align-items: center; flex-wrap: wrap; gap: 5px; padding: 5px 7px; border: 1px solid #e8eaf1; border-radius: 7px; color: #687287; font-size: 9px; }
+.agent-research-provider.is-available { border-color: #dceee4; background: #f7fcf8; }
+.agent-research-provider.is-unavailable { background: #fafafe; }
+.agent-research-provider strong { color: #454e63; }
+.agent-research-provider-count { color: #8991a2; }
+.agent-research-provider-message { flex-basis: 100%; overflow-wrap: anywhere; color: #8b7180; }
+.agent-research-results { display: grid; gap: 8px; margin: 0; padding: 0; list-style: none; }
+.agent-research-result { min-width: 0; padding: 9px 0 0; border-top: 1px solid #eef0f5; }
+.agent-research-result-meta { display: flex; flex-wrap: wrap; gap: 6px 10px; margin-bottom: 5px; color: #8991a2; font-size: 8px; }
+.agent-research-link, .agent-research-link-disabled { display: inline-flex; align-items: flex-start; gap: 5px; max-width: 100%; color: #4d49ad; font-size: 10px; font-weight: 700; line-height: 1.5; overflow-wrap: anywhere; }
+.agent-research-link:hover { color: #38348e; text-decoration: underline; }
+.agent-research-link svg { flex: 0 0 auto; margin-top: 3px; }
+.agent-research-link-disabled { color: #81889a; }
+.agent-research-snippet { margin-top: 4px !important; color: #687287 !important; font-size: 9px !important; line-height: 1.55 !important; white-space: pre-wrap; }
+.agent-research-empty { color: #747e92 !important; font-size: 9px !important; line-height: 1.55 !important; }
+.agent-research-query { margin-top: 8px; color: #828a9c; font-size: 9px; }
+.agent-research-query summary { cursor: pointer; width: fit-content; }
+.agent-research-query p { margin-top: 5px !important; color: #687287 !important; font-size: 9px !important; overflow-wrap: anywhere; }
+@media (max-width: 640px) { .agent-research-heading { align-items: flex-start; } .agent-research-provider { width: 100%; } }
+

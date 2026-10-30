@@ -4,6 +4,7 @@
 pub const DEFAULT_LOG_FILTER: &str = "atlas_api=info,tower_http=info";
 
 pub const HEALTH_ROUTE: &str = "/health";
+pub const KNOWLEDGE_SEARCH_ROUTE: &str = "/api/v1/knowledge/search";
 pub const CASES_ROUTE: &str = "/api/v1/cases";
 pub const CASE_ROUTE: &str = "/api/v1/cases/{case_id}";
 pub const CASE_ARTIFACTS_ROUTE: &str = "/api/v1/cases/{case_id}/artifacts";
@@ -30,10 +31,12 @@ pub const ERROR_EXPECTED_FILE_FIELD: &str = "Expected one multipart field named 
 pub const ERROR_WRONG_MULTIPART_FIELD: &str = "Expected the multipart field to be named 'file'";
 pub const ERROR_INTERRUPTED_UPLOAD: &str = "The upload stream was interrupted or malformed";
 pub const ERROR_EMPTY_CASE_NAME: &str = "Case name cannot be empty";
+/// Formats the client-facing error message for an upload that exceeds the configured byte limit.
 pub fn upload_too_large(limit: u64) -> String {
     format!("File exceeds the configured upload limit of {limit} bytes")
 }
 
+/// Formats the client-facing validation message for a case name that exceeds its configured character limit.
 pub fn case_name_too_long(max_chars: usize) -> String {
     format!("Case name must be at most {max_chars} characters")
 }

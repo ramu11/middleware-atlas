@@ -11,6 +11,7 @@ Middleware Atlas keeps case metadata, uploaded artifacts, diagnostic outputs, an
 - Local JVM thread-dump triage: bounded parsing of thread-state entries, blocked-thread names, lock mentions, and explicit deadlock markers.
 - Eclipse MAT heap-dump analysis through a constrained local container, when Docker or Podman is available. The fixed operations include Leak Suspects, heap overview, histogram, dominator tree, Paths to GC Roots, and heap comparison.
 - Local agent chat through the Ollama HTTP API. The agent uses recent SQLite conversation history and bounded diagnostic evidence; it can explain reports, distinguish observations from hypotheses, and ask for missing details.
+- Server-side technical-topic classification through local Ollama and automatic chat research through configured web/Jira providers. Outbound queries are sanitized locally and limited to user-authored chat text; local attachments and diagnostic evidence are excluded.
 - Eight suggested questions in the UI and persistent conversation history across browser refreshes.
 
 Artifact classification is not the same as analysis: Kafka, Artemis, Debezium, sosreport, and OpenShift artifacts can be classified, but specialized analyzers for those artifact types are not all implemented yet.
@@ -85,7 +86,7 @@ curl -fsS http://127.0.0.1:8080/health
 
 If the browser must use another API address, configure `NEXT_PUBLIC_ATLAS_API_BASE_URL` in `apps/web/.env.local` and restart Next.js. Never put secrets in `NEXT_PUBLIC_*` values.
 
-See [Getting started](docs/getting-started.md), [Local agent setup](docs/local-agent.md), [Architecture](docs/architecture.md), [Configuration](docs/configuration.md), [Persistence and API](docs/persistence.md), [Component map](docs/components.md), and [Troubleshooting](docs/troubleshooting.md).
+See [Getting started](docs/getting-started.md), [Local agent setup](docs/local-agent.md), [Online technical research](docs/knowledge-research.md), [Architecture](docs/architecture.md), [Configuration](docs/configuration.md), [Persistence and API](docs/persistence.md), [Component map](docs/components.md), and [Troubleshooting](docs/troubleshooting.md).
 
 ## Local inference and privacy boundary
 
@@ -94,6 +95,18 @@ The default model endpoint is `http://127.0.0.1:11434`. The Rust backend accepts
 `ATLAS_LLM_SEND_HEAP_CONTEXT` controls whether bounded local diagnostic context is attached to chat requests; it defaults to enabled when unset. Raw heap dumps and MAT index/cache files are not sent to the model. The agent context collector selects specific local summaries/manifests and bounded MAT report excerpts; it does not upload the original dump as chat context.
 
 The API is a local single-user development service without user authentication or multi-user authorization. Keep it bound to loopback and do not expose it to a network. Local inference does not make the application production-ready by itself.
+
+## Online research references in chat
+
+Approved technical chat turns can include references from the configured web and Jira providers.
+The chat UI displays provider status and clickable source references beneath the assistant answer.
+Reference metadata is stored with that assistant message in the local SQLite conversation history,
+so it is restored when the investigation is reopened. Existing messages without research metadata
+remain compatible. Outbound provider queries remain limited to sanitized user-authored text; local
+attachments, assistant content, and diagnostic evidence are not sent to search providers.
+
+See [Online technical knowledge research](docs/knowledge-research.md) for provider configuration,
+redaction controls, data boundaries, and known limitations.
 
 ## Development checks
 

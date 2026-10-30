@@ -36,6 +36,26 @@ ATLAS_LLM_SEND_HEAP_CONTEXT=true
 
 Restart `cargo run -p atlas-api` after changing these values. No API key is required for local Ollama.
 
+## Technical-only classification
+
+Before the agent collects local diagnostic evidence or builds the answer prompt, the Rust API
+asks the configured loopback Ollama model to classify the current user-authored message as
+technical or non-technical. The classifier receives the current message and, for follow-ups,
+up to six earlier user-authored messages (each truncated to 1,200 characters). Assistant
+messages, assistant-generated summaries, uploaded files, local diagnostic context, reports,
+and filesystem paths are not supplied to the classifier.
+
+A non-technical decision is rejected with HTTP 422. If Ollama is unavailable, the model cannot
+be called, or its response is not the expected JSON boolean, Atlas fails closed with HTTP 503.
+The local diagnostic-context collector runs only after the technical check succeeds. This
+allows short follow-ups to be understood in their technical conversation without relying on
+assistant-generated text or diagnostic evidence to decide whether the topic is in scope.
+
+The classifier uses `ATLAS_LLM_BASE_URL` and `ATLAS_LLM_MODEL`; no separate classifier model
+or remote classification provider is configured. Its raw input remains on the loopback Ollama
+service. This classification call is distinct from the subsequent local model call that
+produces the agent's answer.
+
 ## 4. Request flow
 
 - Atlas uses deterministic Rust routing and the server-side artifact `kind` to select a supported diagnostic plugin.
@@ -45,6 +65,19 @@ Restart `cargo run -p atlas-api` after changing these values. No API key is requ
 - Successful user and assistant messages are saved in SQLite, so Atlas can restore recent conversation history after a browser refresh.
 
 `ATLAS_LLM_SEND_HEAP_CONTEXT` defaults to `true` when unset. Set it to `false` to disable attaching diagnostic evidence to new chat requests; the current question and chat history are still sent to the local model.
+
+## Research references in chat history (Phase 2B)
+
+Each assistant answer stores its bounded online research metadata in SQLite with that message.
+Restored conversations return the same references, provider availability, and result counts.
+Messages created before this migration have no research metadata and remain readable. If stored
+metadata is malformed, Atlas omits the panel data rather than failing the entire history request.
+
+The chat UI renders safe HTTP(S) source links in a dedicated panel beneath the relevant answer.
+Links open in a separate tab with `noopener` and `noreferrer`; invalid or unsupported URLs are
+not clickable. Research titles, snippets, and dates are treated as untrusted provider content.
+This UI persistence does not change what providers receive: only sanitized user-authored text is
+eligible for online search. Local evidence and attachments remain outside that boundary.
 
 ## Privacy and security boundary
 
@@ -56,3 +89,5 @@ Restart `cargo run -p atlas-api` after changing these values. No API key is requ
 - The API has no user authentication or multi-user authorization yet. Keep it bound to loopback and do not expose it to a network.
 
 The agent is an evidence assistant, not a guarantee of correct root-cause analysis. Engineers must verify important findings against report references and the original artifacts.
+
+Approved technical chat turns now invoke the configured web/Jira research providers after local classification and sanitization. Only the current and up to three prior user-authored messages, after sanitization, can form the outbound query. Provider failures do not block local Ollama chat. Assistant messages and local diagnostic evidence are excluded from online search; see [Online technical knowledge research](knowledge-research.md) for the full boundary and response contract.

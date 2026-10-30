@@ -19,5 +19,6 @@ tower-http = { version = "0.7.1", features = ["cors", "trace"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt"] }
 uuid = { version = "1.29.0", features = ["v4", "serde"] }
-reqwest = { version = "0.13.5", features = ["json"] }
+# `query` enables RequestBuilder::query for encoded GET search parameters.
+reqwest = { version = "0.13.5", features = ["json", "query"] }
 zip = { version = "8.6.0", default-features = false, features = ["deflate"] }

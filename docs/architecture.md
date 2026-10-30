@@ -45,6 +45,19 @@ The backend accepts only plain HTTP on a loopback address (`localhost`, IPv4 loo
 
 The local evidence policy treats report text, logs, archives, and stack traces as untrusted data rather than instructions. The prompt directs the model to separate observed facts from hypotheses, avoid claiming a confirmed root cause without evidence, and ask for specific missing data where needed. This is guidance to the model, not a substitute for application-level security controls.
 
+### Technical-topic classifier and online research boundary
+
+The chat route uses a local Ollama classifier before it collects diagnostic evidence. The
+classifier sees the current user-authored message and up to six prior user-authored messages;
+it does not receive assistant messages, assistant-generated summaries, attachment content,
+or local diagnostic context. A missing or invalid classifier response fails closed.
+
+`POST /api/v1/knowledge/search` is a separate backend endpoint. It classifies and sanitizes
+the current user query locally, then sends only the sanitized query to selected `web` and/or
+`jira` providers. Its module has no application state, database, filesystem, upload, artifact,
+or diagnostic-workspace access. It does not read or transmit uploaded files or local reports.
+After local classification, chat can invoke configured web/Jira providers using only sanitized current and prior user-authored text. Provider outages are represented in the chat response and do not block local answer generation. Local files, diagnostic evidence, assistant messages, and reports are excluded from outbound research. See [Online technical knowledge research](knowledge-research.md) for details.
+
 ## 4. Diagnostic plugins
 
 ### JVM thread dumps
@@ -65,6 +78,18 @@ The heap plugin prepares a private workspace and invokes fixed operations using 
 
 MAT writes indexes beside its input, so the worker uses an isolated writable copy/workspace rather than modifying the stored original. MAT report context is prepared separately from the raw dump. The context builder has a 128 KiB upper bound; the later agent collector further restricts the evidence sent to chat. If the container runtime cannot be used, MAT request preparation and execution status are recorded without claiming that a report was generated.
 
+### Persisted research references
+
+The chat response includes bounded research metadata, and the assistant-message row stores a
+JSON snapshot in `agent_messages.research_json`. `list_agent_messages` returns this parsed
+metadata with the matching assistant message, allowing the UI to restore links and provider status
+alongside conversation history. Legacy messages have a null value. Invalid stored JSON is
+omitted from the response instead of failing history restoration.
+
+The frontend renders only validated HTTP(S) links with safe new-tab attributes. This is a
+presentation and local-persistence feature; it does not add new provider calls or expand outbound
+query data.
+
 ## 5. API routes
 
 The main routes are:
@@ -79,6 +104,7 @@ The main routes are:
 - `POST /api/v1/cases/{case_id}/diagnostics/heap/{operation}`
 - `POST /api/v1/cases/{case_id}/agent/chat`
 - `GET /api/v1/cases/{case_id}/agent/messages`
+- `POST /api/v1/knowledge/search` (sanitized user-authored query to configured online providers)
 
 The API schema and examples are documented in [persistence.md](persistence.md).
 

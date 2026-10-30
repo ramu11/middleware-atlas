@@ -1,9 +1,11 @@
+//! HTTP service entry point: loads configuration, initializes private local storage and SQLite, starts workers, and registers API routes.
 mod agent;
 mod config;
 mod constants;
 mod diagnostic_jobs;
 mod diagnostic_plugins;
 mod evidence;
+mod knowledge;
 mod queries;
 
 use axum::{
@@ -33,6 +35,7 @@ use tracing_subscriber::EnvFilter;
 use uuid::Uuid;
 
 #[derive(Clone)]
+/// Shared application state for routes that require SQLite, local storage, upload limits, and runtime configuration.
 pub(crate) struct AppState {
     pub(crate) pool: SqlitePool,
     pub(crate) data_dir: PathBuf,
@@ -41,24 +44,29 @@ pub(crate) struct AppState {
 }
 
 #[derive(Debug)]
+/// Internal error type carrying an HTTP status and client-safe message.
 pub(crate) struct ApiError {
     pub(crate) status: StatusCode,
     pub(crate) message: String,
 }
 
 impl ApiError {
+    /// Constructs an API error with its HTTP status and client-safe message.
     pub(crate) fn new(status: StatusCode, message: impl Into<String>) -> Self {
         Self {
             status,
             message: message.into(),
         }
     }
+    /// Creates a standard HTTP 400 API error.
     pub(crate) fn bad_request(message: impl Into<String>) -> Self {
         Self::new(StatusCode::BAD_REQUEST, message)
     }
+    /// Creates the standard HTTP 404 API error without disclosing identifier details.
     pub(crate) fn not_found() -> Self {
         Self::new(StatusCode::NOT_FOUND, constants::ERROR_NOT_FOUND)
     }
+    /// Creates a payload-too-large error using the configured upload limit.
     pub(crate) fn too_large(limit: u64) -> Self {
         Self::new(
             StatusCode::PAYLOAD_TOO_LARGE,
@@ -68,11 +76,13 @@ impl ApiError {
 }
 
 #[derive(Serialize)]
+/// JSON error response shape exposed by the API.
 struct ErrorBody {
     error: String,
 }
 
 impl IntoResponse for ApiError {
+    /// Converts the internal API error into the JSON HTTP response format.
     fn into_response(self) -> Response {
         (
             self.status,
@@ -85,6 +95,7 @@ impl IntoResponse for ApiError {
 }
 
 impl From<sqlx::Error> for ApiError {
+    /// Maps a database or filesystem failure to a client-safe internal API error while logging details.
     fn from(value: sqlx::Error) -> Self {
         error!(error = %value, "database operation failed");
         Self::new(
@@ -95,6 +106,7 @@ impl From<sqlx::Error> for ApiError {
 }
 
 impl From<std::io::Error> for ApiError {
+    /// Maps a database or filesystem failure to a client-safe internal API error while logging details.
     fn from(value: std::io::Error) -> Self {
         error!(error = %value, "filesystem operation failed");
         Self::new(
@@ -105,6 +117,7 @@ impl From<std::io::Error> for ApiError {
 }
 
 #[derive(Debug, Serialize, FromRow)]
+/// SQLite-backed incident case record returned by case endpoints.
 struct CaseRecord {
     id: String,
     name: String,
@@ -114,6 +127,7 @@ struct CaseRecord {
 }
 
 #[derive(Debug, Serialize, FromRow, Clone)]
+/// SQLite-backed metadata for an uploaded local artifact.
 pub(crate) struct ArtifactRecord {
     pub(crate) id: String,
     pub(crate) case_id: String,
@@ -127,22 +141,26 @@ pub(crate) struct ArtifactRecord {
 }
 
 #[derive(Deserialize)]
+/// Request schema for creating an incident case.
 struct CreateCaseRequest {
     name: String,
 }
 
 #[derive(Deserialize)]
+/// Request schema for changing an incident case name.
 struct UpdateCaseRequest {
     name: String,
 }
 
 #[derive(Serialize)]
+/// Response schema for the API health endpoint.
 struct HealthResponse {
     status: &'static str,
     version: &'static str,
 }
 
 #[tokio::main]
+/// Bootstraps the API process, private storage, SQLite pool, diagnostic worker, middleware, routes, and listener.
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     dotenvy::dotenv().ok();
     tracing_subscriber::fmt()
@@ -203,6 +221,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let app = Router::new()
         .route(constants::HEALTH_ROUTE, get(health))
+        .route(
+            constants::KNOWLEDGE_SEARCH_ROUTE,
+            post(knowledge::search_knowledge),
+        )
         .route(constants::CASES_ROUTE, get(list_cases).post(create_case))
         .route(
             constants::CASE_ROUTE,
@@ -248,6 +270,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+/// Applies owner-only directory permissions on Unix platforms.
 fn set_private_dir(path: &FsPath) -> std::io::Result<()> {
     #[cfg(unix)]
     {
@@ -258,6 +281,7 @@ fn set_private_dir(path: &FsPath) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Applies owner-only file permissions on Unix platforms.
 pub(crate) fn set_private_file(path: &FsPath) -> std::io::Result<()> {
     #[cfg(unix)]
     {
@@ -268,6 +292,7 @@ pub(crate) fn set_private_file(path: &FsPath) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Recursively removes incomplete upload files left by interrupted requests.
 async fn cleanup_partial_uploads(root: &FsPath) -> std::io::Result<()> {
     let mut entries = match fs::read_dir(root).await {
         Ok(entries) => entries,
@@ -286,6 +311,7 @@ async fn cleanup_partial_uploads(root: &FsPath) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Creates a human-readable incident reference from the case name and internal identifier.
 fn readable_incident_id(name: &str, internal_id: &str) -> String {
     let normalized = name.to_ascii_lowercase();
     let category = if ["heap", "memory", "leak", "oom", "outofmemory"]
@@ -316,6 +342,7 @@ fn readable_incident_id(name: &str, internal_id: &str) -> String {
     format!("ATLAS-{category}-{suffix}")
 }
 
+/// Returns the API health state and compiled application version.
 async fn health() -> Json<HealthResponse> {
     Json(HealthResponse {
         status: constants::HEALTH_STATUS_OK,
@@ -323,6 +350,7 @@ async fn health() -> Json<HealthResponse> {
     })
 }
 
+/// Lists persisted incident cases from SQLite.
 async fn list_cases(State(state): State<AppState>) -> Result<Json<Vec<CaseRecord>>, ApiError> {
     let records = sqlx::query_as::<_, CaseRecord>(queries::LIST_CASES)
         .fetch_all(&state.pool)
@@ -330,6 +358,7 @@ async fn list_cases(State(state): State<AppState>) -> Result<Json<Vec<CaseRecord
     Ok(Json(records))
 }
 
+/// Validates and persists a new incident case with a readable display reference.
 async fn create_case(
     State(state): State<AppState>,
     Json(input): Json<CreateCaseRequest>,
@@ -346,6 +375,7 @@ async fn create_case(
     Ok((StatusCode::CREATED, Json(record)))
 }
 
+/// Loads one case by UUID or returns the standard not-found response.
 async fn get_case(
     State(state): State<AppState>,
     Path(case_id): Path<String>,
@@ -359,6 +389,7 @@ async fn get_case(
     Ok(Json(record))
 }
 
+/// Validates and updates the display name of an existing case.
 async fn update_case(
     State(state): State<AppState>,
     Path(case_id): Path<String>,
@@ -375,6 +406,7 @@ async fn update_case(
     Ok(Json(record))
 }
 
+/// Deletes an idle case and cleans up its case-scoped local directories.
 async fn delete_case(
     State(state): State<AppState>,
     Path(case_id): Path<String>,
@@ -424,6 +456,7 @@ async fn delete_case(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// Lists uploaded artifacts belonging to a validated case.
 async fn list_artifacts(
     State(state): State<AppState>,
     Path(case_id): Path<String>,
@@ -437,6 +470,7 @@ async fn list_artifacts(
     Ok(Json(records))
 }
 
+/// Streams one bounded upload to private storage while computing its SHA-256 digest.
 async fn upload_artifact(
     State(state): State<AppState>,
     Path(case_id): Path<String>,
@@ -557,6 +591,7 @@ async fn upload_artifact(
 }
 
 #[derive(Deserialize)]
+/// Request schema selecting diagnostic artifacts and describing the incident.
 struct PrepareDiagnosticsRequest {
     problem_description: String,
     #[serde(default)]
@@ -564,6 +599,7 @@ struct PrepareDiagnosticsRequest {
 }
 
 #[derive(Serialize)]
+/// Response schema describing prepared diagnostic plugins and their execution state.
 pub(crate) struct PrepareDiagnosticsResponse {
     pub(crate) case_id: String,
     pub(crate) status: String,
@@ -571,6 +607,7 @@ pub(crate) struct PrepareDiagnosticsResponse {
     pub(crate) preparations: Vec<diagnostic_plugins::PreparedPlugin>,
 }
 
+/// Validates selected artifacts and prepares the configured local diagnostic plugins.
 async fn prepare_diagnostics(
     State(state): State<AppState>,
     Path(case_id): Path<String>,
@@ -731,6 +768,7 @@ async fn prepare_diagnostics(
     }))
 }
 
+/// Validates and executes one supported MAT heap operation synchronously.
 pub(crate) async fn run_heap_operation_now(
     State(state): State<AppState>,
     Path((case_id, operation)): Path<(String, String)>,
@@ -903,6 +941,7 @@ pub(crate) async fn run_heap_operation_now(
     }))
 }
 
+/// Removes an artifact and its derived MAT workspace after active jobs have stopped.
 async fn delete_artifact(
     State(state): State<AppState>,
     Path((case_id, artifact_id)): Path<(String, String)>,
@@ -957,6 +996,7 @@ async fn delete_artifact(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// Checks that a case exists before a case-scoped operation proceeds.
 pub(crate) async fn ensure_case_exists(pool: &SqlitePool, case_id: &str) -> Result<(), ApiError> {
     let exists = sqlx::query_scalar::<_, i64>(queries::CASE_EXISTS)
         .bind(case_id)
@@ -969,12 +1009,14 @@ pub(crate) async fn ensure_case_exists(pool: &SqlitePool, case_id: &str) -> Resu
     }
 }
 
+/// Validates an externally supplied UUID and maps invalid identifiers to not-found.
 pub(crate) fn require_uuid(value: &str) -> Result<(), ApiError> {
     Uuid::parse_str(value)
         .map(|_| ())
         .map_err(|_| ApiError::not_found())
 }
 
+/// Trims and bounds a user-supplied case name.
 fn validate_case_name(input: &str, max_chars: usize) -> Result<String, ApiError> {
     let value = input.trim();
     if value.is_empty() {
@@ -988,6 +1030,7 @@ fn validate_case_name(input: &str, max_chars: usize) -> Result<String, ApiError>
     Ok(value.to_owned())
 }
 
+/// Strips client path components and control characters from an uploaded filename.
 fn safe_filename(input: &str) -> String {
     let normalized = input.replace('\\', "/");
     let leaf = normalized
@@ -1012,6 +1055,7 @@ mod tests {
     use super::{safe_filename, validate_case_name};
 
     #[test]
+    /// Verifies client-controlled directory components are removed from uploaded filenames.
     fn filename_never_keeps_client_directories() {
         assert_eq!(safe_filename("../../etc/passwd"), "passwd");
         assert_eq!(safe_filename(r"C:\\temp\\heap.hprof"), "heap.hprof");
@@ -1019,6 +1063,7 @@ mod tests {
     }
 
     #[test]
+    /// Verifies case-name trimming and empty-name validation.
     fn validates_case_names() {
         assert!(validate_case_name("  broker outage  ", 140).is_ok());
         assert!(validate_case_name("  ", 140).is_err());
