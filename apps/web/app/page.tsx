@@ -773,7 +773,7 @@ return (
             hasStagedFiles={artifacts.length > 0}
             stagedFiles={artifacts.map(({ id, file }) => ({ id, name: file.name, size: file.size }))}
             onRemoveStagedFile={removeFile}
-            onAttachFiles={() => inputRef.current?.click()}
+            onFilesSelected={addFiles}
             onNewInvestigation={clearActiveCase}
           />
 

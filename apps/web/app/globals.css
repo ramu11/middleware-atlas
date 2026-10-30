@@ -406,8 +406,8 @@ h1 span { color: #746ce2; }
 .nav-thread-ref { overflow: hidden; color: #9299b1; text-overflow: ellipsis; white-space: nowrap; font-size: 9px; }
 .nav-thread-item.active .nav-thread-ref { color: #c3beff; }
 .saved-case-card.active { border-color: #8c83f1; box-shadow: 0 0 0 2px rgba(116, 106, 222, .12); background: #fbfaff; }
-.jvm-workspace-content .upload-card,
-.jvm-workspace-content .files-section { display: none !important; }
+/* File selection is provided by the agent composer; keep the JVM workspace focused. */
+.jvm-workspace-content .upload-card { display: none !important; }
 .agent-empty-thread { display: flex; align-items: flex-start; gap: 10px; margin: 15px 0; padding: 12px 14px; border: 1px solid #e6e8f1; border-radius: 10px; background: #fafaff; color: #444b62; }
 .agent-empty-thread-icon { display: grid; place-items: center; width: 31px; height: 31px; flex: 0 0 auto; border-radius: 8px; background: #f0efff; color: #7168dd; }
 .agent-empty-thread strong { display: block; font-size: 12px; line-height: 1.45; }
@@ -420,9 +420,11 @@ h1 span { color: #746ce2; }
 .agent-attachment-chip button:hover { background: #ecebff; color: #4f46bd; }
 .agent-composer-footer { gap: 10px; }
 .agent-composer-tools { display: flex; min-width: 0; align-items: center; gap: 8px; }
-.agent-attach-button { display: grid; place-items: center; width: 34px; height: 34px; flex: 0 0 auto; border: 1px solid #e0e3ed; border-radius: 50%; background: #fff; color: #5e6680; cursor: pointer; transition: border-color .16s, background .16s, color .16s; }
-.agent-attach-button:hover:not(:disabled) { border-color: #bcb6f7; background: #f6f5ff; color: #554bc8; }
-.agent-attach-button:disabled { cursor: not-allowed; opacity: .5; }
+.agent-attach-button { position: relative; display: grid; place-items: center; width: 34px; height: 34px; flex: 0 0 auto; border: 1px solid #e0e3ed; border-radius: 50%; background: #fff; color: #5e6680; cursor: pointer; transition: border-color .16s, background .16s, color .16s; }
+.agent-attach-button:hover:not(.is-disabled) { border-color: #bcb6f7; background: #f6f5ff; color: #554bc8; }
+.agent-attach-button.is-disabled { cursor: not-allowed; opacity: .5; }
+.agent-file-picker-input { position: absolute; inset: 0; width: 100%; height: 100%; margin: 0; opacity: 0; cursor: pointer; }
+.agent-attach-button.is-disabled .agent-file-picker-input { cursor: not-allowed; }
 .agent-composer-hint { color: #9298aa; font-size: 10px; line-height: 1.4; }
 @media (max-height: 760px) and (min-width: 641px) { .sidebar-thread-section { margin-top: 11px; padding-top: 10px; } .sidebar-thread-list { max-height: 30vh; } }
 @media (max-width: 640px) { .sidebar-thread-section { margin-top: 12px; } .agent-composer-footer { align-items: flex-end; } .agent-composer-hint { max-width: 48vw; } }

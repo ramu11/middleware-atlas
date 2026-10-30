@@ -10,7 +10,7 @@ type AgentConversationProps = {
   onPrepare: (problemDescription: string) => Promise<DiagnosticPreparationResponse>;
   hasStagedFiles: boolean;
   stagedFiles: StagedAttachment[];
-  onAttachFiles: () => void;
+  onFilesSelected: (files: FileList) => void;
   onRemoveStagedFile: (id: string) => void;
   onNewInvestigation: () => void;
 };
@@ -19,6 +19,7 @@ type LocalRun = { id: string; description: string; result: DiagnosticPreparation
 
 const ACTIVE_CASE_KEY = "atlas.agent.activeCaseId";
 const SESSION_CASE_KEY = "atlas.agentSessionCaseId";
+const RESTORE_TIMEOUT_MS = 8000;
 const QUICK_PROMPTS = [
   "Analyze this heap dump for memory-leak suspects",
   "Review this thread dump for blocked threads or deadlocks",
@@ -123,7 +124,7 @@ function ResearchReferences({ research }: { research?: AgentResearch | null }) {
   );
 }
 
-export function AgentConversation({ onPrepare, hasStagedFiles, stagedFiles, onAttachFiles, onRemoveStagedFile, onNewInvestigation }: AgentConversationProps) {
+export function AgentConversation({ onPrepare, hasStagedFiles, stagedFiles, onFilesSelected, onRemoveStagedFile, onNewInvestigation }: AgentConversationProps) {
   const [draft, setDraft] = useState("");
   const [caseId, setCaseId] = useState<string | null>(null);
   const [incidentRef, setIncidentRef] = useState("");
@@ -139,8 +140,16 @@ export function AgentConversation({ onPrepare, hasStagedFiles, stagedFiles, onAt
     let selectionGeneration = 0;
     const loadCase = async (storedId: string) => {
       const requestGeneration = ++selectionGeneration;
+      let restoreTimer: number | undefined;
       try {
-        const [record, history] = await Promise.all([getCase(storedId), listAgentMessages(storedId)]);
+        const [record, history] = await Promise.race([
+          Promise.all([getCase(storedId), listAgentMessages(storedId)]),
+          new Promise<never>((_, reject) => {
+            restoreTimer = window.setTimeout(() => {
+              reject(new Error(`Loading the saved conversation timed out after ${RESTORE_TIMEOUT_MS / 1000} seconds.`));
+            }, RESTORE_TIMEOUT_MS);
+          }),
+        ]);
         if (cancelled || requestGeneration !== selectionGeneration) return;
         try {
           window.localStorage.setItem(ACTIVE_CASE_KEY, storedId);
@@ -151,8 +160,25 @@ export function AgentConversation({ onPrepare, hasStagedFiles, stagedFiles, onAt
         setMessages(history);
         setError("");
       } catch (cause) {
-        if (!cancelled) setError(cause instanceof Error ? cause.message : "Could not restore the agent conversation.");
+        if (!cancelled && requestGeneration === selectionGeneration) {
+          const detail = cause instanceof Error ? cause.message : "The saved conversation could not be loaded.";
+          setCaseId(null);
+          setIncidentRef("");
+          setMessages([]);
+          setRuns([]);
+          setError(`${detail} You can continue with a new investigation or select a saved incident from Recent Incidents.`);
+          // Clear only the stale browser selection pointer; the incident and its files remain in SQLite.
+          try {
+            if (window.localStorage.getItem(ACTIVE_CASE_KEY) === storedId) {
+              window.localStorage.removeItem(ACTIVE_CASE_KEY);
+            }
+            if (window.sessionStorage.getItem(SESSION_CASE_KEY) === storedId) {
+              window.sessionStorage.removeItem(SESSION_CASE_KEY);
+            }
+          } catch { /* Storage can be disabled by browser policy. */ }
+        }
       } finally {
+        if (restoreTimer !== undefined) window.clearTimeout(restoreTimer);
         if (!cancelled && requestGeneration === selectionGeneration) setRestoring(false);
       }
     };
@@ -297,7 +323,7 @@ export function AgentConversation({ onPrepare, hasStagedFiles, stagedFiles, onAt
         <span className="agent-section-label">SUGGESTED STARTING POINTS</span>
         <div className="agent-prompt-chips">
           {QUICK_PROMPTS.map((prompt) => (
-            <button className="agent-prompt-chip" key={prompt} type="button" disabled={working || restoring} onClick={() => { setDraft(prompt); setStatus(""); setError(""); }}>
+            <button className="agent-prompt-chip" key={prompt} type="button" disabled={working} onClick={() => { setDraft(prompt); setStatus(""); setError(""); }}>
               {prompt}
             </button>
           ))}
@@ -352,7 +378,7 @@ export function AgentConversation({ onPrepare, hasStagedFiles, stagedFiles, onAt
               <span className="agent-attachment-chip" key={file.id} title={`${file.name} · ${file.size.toLocaleString()} bytes`}>
                 <FileText size={13} />
                 <span>{file.name}</span>
-                <button type="button" aria-label={`Remove ${file.name}`} title={`Remove ${file.name}`} onClick={() => onRemoveStagedFile(file.id)} disabled={working || restoring}>
+                <button type="button" aria-label={`Remove ${file.name}`} title={`Remove ${file.name}`} onClick={() => onRemoveStagedFile(file.id)} disabled={working}>
                   <X size={12} />
                 </button>
               </span>
@@ -368,14 +394,27 @@ export function AgentConversation({ onPrepare, hasStagedFiles, stagedFiles, onAt
           onKeyDown={handleComposerKeyDown}
           rows={4}
           maxLength={12000}
-          disabled={working || restoring}
+          disabled={working}
           placeholder="Describe the symptoms, ask what the MAT report means, or answer the agent's follow-up question…"
         />
         <div className="agent-composer-footer">
           <div className="agent-composer-tools">
-            <button className="agent-attach-button" type="button" onClick={onAttachFiles} disabled={working || restoring} aria-label="Attach diagnostic files" title="Attach a heap or thread dump">
-              <Plus size={19} />
-            </button>
+            <label className={`agent-attach-button ${working ? "is-disabled" : ""}`} title="Attach a heap or thread dump">
+              <Plus size={19} aria-hidden="true" />
+              <span className="visually-hidden">Attach diagnostic files</span>
+              <input
+                className="agent-file-picker-input"
+                type="file"
+                multiple
+                disabled={working}
+                aria-label="Attach diagnostic files"
+                onChange={(event) => {
+                  const selected = event.currentTarget.files;
+                  if (selected && selected.length > 0) onFilesSelected(selected);
+                  event.currentTarget.value = "";
+                }}
+              />
+            </label>
             <span className="agent-composer-hint">Ctrl/⌘ + Enter · {draft.length}/12,000 {restoring ? "· loading incident…" : hasStagedFiles ? `· ${stagedFiles.length} file(s) ready` : "· saved locally"}</span>
           </div>
           <button className="button button-primary agent-queue-button" type="submit" disabled={!draft.trim() || working || restoring}>
